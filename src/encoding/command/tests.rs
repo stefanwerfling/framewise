@@ -1,0 +1,317 @@
+use super::*;
+use crate::encoding::plan::{PlanCapabilities, build_plan};
+use crate::media::fixtures::*;
+use crate::media::model::*;
+
+fn strings(args: &[OsString]) -> Vec<String> {
+    args.iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect()
+}
+
+fn value_after(args: &[String], key: &str) -> Vec<String> {
+    args.windows(2)
+        .filter(|w| w[0] == key)
+        .map(|w| w[1].clone())
+        .collect()
+}
+
+fn uhd_hdr() -> MediaFile {
+    let mut v = video("hevc", 3840, 2160);
+    v.bit_depth = Some(10);
+    v.pix_fmt = Some("yuv420p10le".into());
+    v.hdr = HdrFormat::Hdr10;
+    let mut eng = audio("truehd", None, 8, "eng");
+    eng.title = Some("TrueHD 7.1".into());
+    let mut ger_sub = subtitle("subrip", "ger");
+    ger_sub.forced = true;
+    let mut m = media(
+        "mkv",
+        50_000_000_000,
+        7200.0,
+        vec![v],
+        vec![eng, audio("ac3", None, 6, "ger")],
+        vec![ger_sub, subtitle("hdmv_pgs_subtitle", "eng")],
+    );
+    m.absolute_path = "/media/movies/Film; rm -rf $HOME `x`.mkv".into();
+    m
+}
+
+#[test]
+fn universal_hdr_command() {
+    let m = uhd_hdr();
+    let profile = EncodingProfile::universal();
+    let plan = build_plan(&m, &profile, &PlanCapabilities::default());
+    let out = Path::new("/work/1/out.mp4");
+    let args = strings(&build_encode_args(&EncodeCommand {
+        media: &m,
+        plan: &plan,
+        profile: &profile,
+        setup: &EncoderSetup::cpu(),
+        output: out,
+        crf: None,
+        window: None,
+    }));
+
+    // file name is passed verbatim as a single argument
+    assert!(args.contains(&"/media/movies/Film; rm -rf $HOME `x`.mkv".to_string()));
+    assert_eq!(value_after(&args, "-progress"), ["pipe:1"]);
+    assert!(args.contains(&"-n".to_string()));
+    assert_eq!(
+        value_after(&args, "-map"),
+        ["0:v:0", "0:a:0", "0:a:0", "0:a:1", "0:a:1", "0:s:0"],
+        "video, eng converted + eng stereo, ger copy + ger stereo, text subtitle"
+    );
+    let vf = &value_after(&args, "-vf")[0];
+    assert!(vf.starts_with("zscale=w=1920:h=1080"));
+    assert!(vf.contains("tonemap=tonemap=hable"));
+    assert!(vf.ends_with("format=yuv420p"));
+    assert_eq!(value_after(&args, "-c:v"), ["libx264"]);
+    assert_eq!(value_after(&args, "-crf"), ["20"]);
+    assert_eq!(value_after(&args, "-color_trc"), ["bt709"]);
+    // TrueHD → AC3 5.1
+    assert_eq!(value_after(&args, "-c:a:0"), ["ac3"]);
+    assert_eq!(value_after(&args, "-ac:a:0"), ["6"]);
+    assert_eq!(value_after(&args, "-c:a:1"), ["aac"]);
+    assert_eq!(value_after(&args, "-c:a:2"), ["copy"]);
+    assert_eq!(value_after(&args, "-c:s:0"), ["mov_text"]);
+    assert_eq!(value_after(&args, "-disposition:s:0"), ["forced"]);
+    assert_eq!(value_after(&args, "-disposition:a:0"), ["default"]);
+    assert_eq!(value_after(&args, "-movflags"), ["+faststart"]);
+    assert_eq!(args.last().unwrap(), "/work/1/out.mp4");
+}
+
+#[test]
+fn compat_stereo_per_language() {
+    let m = uhd_hdr();
+    let plan = build_plan(
+        &m,
+        &EncodingProfile::universal(),
+        &PlanCapabilities::default(),
+    );
+    // eng: AC3 (converted) + AAC stereo; ger: AC3 copy + AAC stereo
+    let langs: Vec<_> = plan
+        .audio
+        .iter()
+        .map(|a| (a.language.clone().unwrap(), a.purpose))
+        .collect();
+    use crate::encoding::plan::AudioPurpose::*;
+    assert_eq!(
+        langs,
+        [
+            ("eng".to_string(), Converted),
+            ("eng".to_string(), CompatibilityStereo),
+            ("ger".to_string(), Original),
+            ("ger".to_string(), CompatibilityStereo),
+        ]
+    );
+}
+
+#[test]
+fn hardware_variants() {
+    let m = media(
+        "mkv",
+        10_000_000_000,
+        3600.0,
+        vec![video("mpeg2video", 1920, 1080)],
+        vec![audio("aac", Some("LC"), 2, "eng")],
+        vec![],
+    );
+    let profile = EncodingProfile::universal();
+    let plan = build_plan(&m, &profile, &PlanCapabilities::default());
+    let run = |backend| {
+        let setup = EncoderSetup {
+            hw_encode: Some(backend),
+            hw_decode: Some(backend),
+            ..EncoderSetup::cpu()
+        };
+        strings(&build_encode_args(&EncodeCommand {
+            media: &m,
+            plan: &plan,
+            profile: &profile,
+            setup: &setup,
+            output: Path::new("/o.mp4"),
+            crf: Some(22),
+            window: None,
+        }))
+    };
+    let nv = run(HwBackend::Nvidia);
+    assert_eq!(value_after(&nv, "-c:v"), ["h264_nvenc"]);
+    assert_eq!(value_after(&nv, "-hwaccel"), ["cuda"]);
+    assert_eq!(value_after(&nv, "-cq"), ["23"]);
+    let va = run(HwBackend::Vaapi);
+    assert_eq!(value_after(&va, "-vaapi_device"), ["/dev/dri/renderD128"]);
+    assert!(value_after(&va, "-vf")[0].ends_with("format=nv12,hwupload"));
+    assert!(value_after(&va, "-pix_fmt").is_empty());
+    let qsv = run(HwBackend::IntelQsv);
+    assert_eq!(value_after(&qsv, "-global_quality"), ["22"]);
+}
+
+#[test]
+fn copy_and_sample_window() {
+    let m = media(
+        "mkv",
+        2_000_000_000,
+        3600.0,
+        vec![video("h264", 1920, 1080)],
+        vec![audio("aac", Some("LC"), 2, "eng")],
+        vec![],
+    );
+    let profile = EncodingProfile::universal();
+    let plan = build_plan(&m, &profile, &PlanCapabilities::default());
+    let args = strings(&build_encode_args(&EncodeCommand {
+        media: &m,
+        plan: &plan,
+        profile: &profile,
+        setup: &EncoderSetup::cpu(),
+        output: Path::new("/o.mp4"),
+        crf: None,
+        window: None,
+    }));
+    assert_eq!(value_after(&args, "-c:v"), ["copy"]);
+    assert!(value_after(&args, "-vf").is_empty());
+
+    let mut p2 = profile.clone();
+    p2.video.allow_copy = false;
+    let plan = build_plan(&m, &p2, &PlanCapabilities::default());
+    let args = strings(&build_encode_args(&EncodeCommand {
+        media: &m,
+        plan: &plan,
+        profile: &p2,
+        setup: &EncoderSetup::cpu(),
+        output: Path::new("/s.mkv"),
+        crf: Some(24),
+        window: Some(Window {
+            start_s: 100.0,
+            duration_s: 10.0,
+        }),
+    }));
+    assert_eq!(value_after(&args, "-ss"), ["100.000"]);
+    assert_eq!(value_after(&args, "-crf"), ["24"]);
+    assert!(args.contains(&"-an".to_string()));
+    assert_eq!(value_after(&args, "-map"), ["0:v:0"]);
+}
+
+#[test]
+fn h264_level_for_high_fps() {
+    assert_eq!(h264_level(Dimensions::new(1920, 1080), 59.94, "4.1"), "4.2");
+    assert_eq!(
+        h264_level(Dimensions::new(1920, 1080), 23.976, "4.1"),
+        "4.1"
+    );
+    assert_eq!(h264_level(Dimensions::new(1280, 720), 60.0, "4.1"), "4.1");
+}
+
+#[test]
+fn sidecar_names_and_args() {
+    let sub = SubtitleOutput {
+        source_type_index: 3,
+        codec: SubtitleCodec::Pgs,
+        action: SubtitleAction::Sidecar {
+            format: SidecarFormat::Sup,
+            suffix: "ger.forced".into(),
+        },
+        language: Some("ger".into()),
+        title: None,
+        default: false,
+        forced: true,
+    };
+    let p = sidecar_path(Path::new("/out/Movie (2020).mp4"), &sub).unwrap();
+    assert_eq!(p, Path::new("/out/Movie (2020).ger.forced.sup"));
+    let args = strings(&build_sidecar_args(Path::new("/in.mkv"), &sub, &p));
+    assert_eq!(value_after(&args, "-map"), ["0:s:3"]);
+    assert_eq!(value_after(&args, "-f"), ["sup"]);
+}
+
+#[test]
+fn quality_reference_matches_encoder_input() {
+    let m = uhd_hdr();
+    let profile = EncodingProfile::universal();
+    let plan = build_plan(&m, &profile, &PlanCapabilities::default());
+    let cpu = EncoderSetup::cpu();
+    let cmd = EncodeCommand {
+        media: &m,
+        plan: &plan,
+        profile: &profile,
+        setup: &cpu,
+        output: Path::new("/w/sample.mkv"),
+        crf: Some(25),
+        window: None,
+    };
+    let window = Window {
+        start_s: 600.0,
+        duration_s: 20.0,
+    };
+    let reference =
+        strings(&build_reference_args(&cmd, window, Path::new("/w/reference_0.mkv")).unwrap());
+    let main = strings(&build_encode_args(&EncodeCommand {
+        output: Path::new("/w/out.mp4"),
+        crf: None,
+        ..cmd
+    }));
+    // identical filter chain (scale + tonemap + format) as the real encode
+    assert_eq!(value_after(&reference, "-vf"), value_after(&main, "-vf"));
+    assert_eq!(value_after(&reference, "-c:v"), ["ffv1"]);
+    assert_eq!(value_after(&reference, "-ss"), ["600.000"]);
+    assert!(reference.contains(&"/media/movies/Film; rm -rf $HOME `x`.mkv".to_string()));
+    assert!(reference.contains(&"-n".to_string()));
+
+    let sample =
+        strings(&build_reference_sample_args(&cmd, Path::new("/w/reference_0.mkv")).unwrap());
+    assert!(value_after(&sample, "-vf").is_empty(), "already filtered");
+    assert_eq!(value_after(&sample, "-i"), ["/w/reference_0.mkv"]);
+    assert_eq!(value_after(&sample, "-crf"), ["25"]);
+    assert_eq!(value_after(&sample, "-c:v"), value_after(&main, "-c:v"));
+    assert_eq!(
+        value_after(&sample, "-preset"),
+        value_after(&main, "-preset")
+    );
+    assert_eq!(value_after(&sample, "-color_trc"), ["bt709"]);
+    assert_eq!(sample.last().map(String::as_str), Some("/w/sample.mkv"));
+
+    // hardware encoders add their own filters: no reference path
+    let mut hw = EncoderSetup::cpu();
+    hw.hw_encode = Some(HwBackend::Vaapi);
+    let hw_cmd = EncodeCommand { setup: &hw, ..cmd };
+    assert!(build_reference_args(&hw_cmd, window, Path::new("/r.mkv")).is_none());
+    assert!(build_reference_sample_args(&hw_cmd, Path::new("/r.mkv")).is_none());
+}
+
+#[test]
+fn hevc_cpu_is_tagged_and_throttled() {
+    let m = media(
+        "mkv",
+        10_000_000_000,
+        3600.0,
+        vec![video("h264", 1920, 1080)],
+        vec![audio("aac", Some("LC"), 2, "eng")],
+        vec![],
+    );
+    let mut profile = EncodingProfile::universal();
+    profile.video.codec = TargetVideoCodec::Hevc;
+    profile.video.preset = "medium".into();
+    profile.video.allow_copy = false;
+    let plan = build_plan(&m, &profile, &PlanCapabilities::default());
+    let setup = EncoderSetup {
+        threads: 4,
+        ..EncoderSetup::cpu()
+    };
+    let args = strings(&build_encode_args(&EncodeCommand {
+        media: &m,
+        plan: &plan,
+        profile: &profile,
+        setup: &setup,
+        output: Path::new("/o.mp4"),
+        crf: Some(24),
+        window: None,
+    }));
+    assert_eq!(value_after(&args, "-c:v"), ["libx265"]);
+    assert_eq!(value_after(&args, "-tag:v"), ["hvc1"]);
+    assert_eq!(value_after(&args, "-crf"), ["24"]);
+    assert_eq!(value_after(&args, "-preset"), ["medium"]);
+    assert_eq!(
+        value_after(&args, "-x265-params"),
+        ["log-level=error:pools=4"]
+    );
+    assert!(value_after(&args, "-profile:v").is_empty());
+}
