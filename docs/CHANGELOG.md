@@ -280,3 +280,22 @@ statt fest im Profil zu stehen.
   - Bei CRF 20 erreichte die Szene bei 52:10 nur VMAF 93,7. Die drei gleichmäßig
     verteilten Stellen der früheren Läufe hatten sie nicht erfasst.
   - Die Suche wählte deshalb CRF 18, dort lag die schwächste Probe bei 95,2.
+- Lauf 3 mit Profil E und 60-min-Budget (gleicher Film):
+  - Suche 25,7 min. H.264 slow erreichte die Grenze bei CRF 18 (schwächste Probe 95,2),
+    HEVC medium bei CRF 17 (95,4). Laut Proben war HEVC 17 % kleiner (Verhältnis zur
+    Quelle 0,258 statt 0,309), also wurde HEVC gewählt.
+  - Ergebnis: 4,58 GB, Video 5,3 Mbit/s, VMAF 97,6 im Mittel und 95,4 an der schwächsten
+    Stelle, Gesamtdauer 4 h 13 min. Validierung und Sidecars vollständig, Kennung `hvc1`.
+  - Größer als Lauf 1 (4,19 GB, CRF 20), weil die Grenze jetzt an der schwierigsten Szene
+    gilt. Lauf 1 lag dort bei 93,7.
+  - Die Annahme „x265 erreicht dieselbe Qualität bei CRF + 2“ traf hier nicht zu: x265 und
+    x264 lieferten bei gleicher CRF fast dieselbe VMAF. Die Suche hat das selbst korrigiert.
+
+### Projektpflege
+- `rust-version` korrigiert: von 1.85 auf 1.95. egui/eframe 0.37 setzen 1.95 voraus;
+  mit einem älteren Compiler meldet Cargo das jetzt direkt, statt mitten im Build abzubrechen.
+- README ergänzt: Profil E, HEVC-Vergleich (`libx265` optional), Arbeitsverzeichnis
+  auf dem Ziel-Laufwerk.
+- GitHub-Actions-Workflow (`.github/workflows/ci.yml`): `cargo fmt --check`, Clippy mit
+  `-D warnings`, `cargo test` mit installiertem ffmpeg (End-to-End-Tests laufen mit)
+  sowie ein Build mit der Mindestversion 1.95.
