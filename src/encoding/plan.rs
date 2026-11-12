@@ -269,6 +269,12 @@ pub enum PlanWarning {
     DolbyVisionMetadataDropped,
     Hdr10PlusMetadataDropped,
     HdrPreserveNotSupported,
+    /// HDR is kept only when the video stream is copied.
+    HdrPreserveNeedsCopy,
+    BlackBarsCropped {
+        from: Dimensions,
+        to: Dimensions,
+    },
     CoverArtDropped,
     DataStreamsDropped {
         count: usize,
@@ -347,6 +353,10 @@ impl PlanWarning {
             }
             PlanWarning::HdrPreserveNotSupported => {
                 tr!("Preserving HDR requires HEVC – converting to SDR").into()
+            }
+            PlanWarning::HdrPreserveNeedsCopy => tr!("HDR can only be kept when the video stream is copied unchanged – re-encoding converts to SDR").into(),
+            PlanWarning::BlackBarsCropped { from, to } => {
+                trf!("Black bars removed: {} → {}", from, to)
             }
             PlanWarning::CoverArtDropped => tr!("Embedded cover art is not kept").into(),
             PlanWarning::DataStreamsDropped { count } => trf!(
@@ -570,8 +580,9 @@ fn plan_video(
 ) -> VideoPlan {
     let settings = &profile.video;
     let source = resolution::oriented(v.width, v.height, v.rotation);
-    let resolution = resolution::compute_target(
+    let resolution = resolution::compute_target_cropped(
         source,
+        v.crop.filter(|_| settings.auto_crop),
         Dimensions::new(settings.max_width, settings.max_height),
     );
     let mut reasons = Vec::new();
@@ -594,39 +605,6 @@ fn plan_video(
         ));
     }
 
-    // HDR handling
-    let mut hdr = HdrConversion::None;
-    if v.hdr.is_hdr() {
-        if profile.hdr.strategy == HdrStrategy::Preserve && settings.codec != TargetVideoCodec::Hevc
-        {
-            warnings.push(PlanWarning::HdrPreserveNotSupported);
-        }
-        let preserve = profile.hdr.strategy == HdrStrategy::Preserve
-            && settings.codec == TargetVideoCodec::Hevc;
-        if !preserve {
-            reasons.push(VideoReason::Hdr(v.hdr.label()));
-            if !(caps.zscale && caps.tonemap) {
-                blockers.push(PlanBlocker::TonemapUnavailable);
-            }
-            match &v.hdr {
-                HdrFormat::DolbyVision(dv) => {
-                    if dv.compatibility == DvCompatibility::None || dv.profile == Some(5) {
-                        blockers.push(PlanBlocker::DolbyVisionProfile5);
-                    }
-                    warnings.push(PlanWarning::DolbyVisionMetadataDropped);
-                }
-                HdrFormat::Hdr10Plus => warnings.push(PlanWarning::Hdr10PlusMetadataDropped),
-                _ => {}
-            }
-            warnings.push(PlanWarning::HdrToneMapped {
-                format: v.hdr.label(),
-            });
-            hdr = HdrConversion::TonemapToSdr {
-                source: v.hdr.clone(),
-            };
-        }
-    }
-
     match resolution.op {
         ResizeOp::Downscale => reasons.push(VideoReason::Resolution(source)),
         ResizeOp::CropToEven => reasons.push(VideoReason::OddDimensions),
@@ -635,6 +613,22 @@ fn plan_video(
     let deinterlace = settings.deinterlace && v.interlaced == Some(true);
     if deinterlace {
         reasons.push(VideoReason::Interlaced);
+    }
+
+    // HDR is only kept by copying the stream: re-encoding writes 8-bit
+    // BT.709 and would silently drop it, so every encode tone maps.
+    let hdr_source = v.hdr.is_hdr();
+    let preserve_hdr = hdr_source
+        && profile.hdr.strategy == HdrStrategy::Preserve
+        && settings.codec == TargetVideoCodec::Hevc;
+    if hdr_source
+        && profile.hdr.strategy == HdrStrategy::Preserve
+        && settings.codec != TargetVideoCodec::Hevc
+    {
+        warnings.push(PlanWarning::HdrPreserveNotSupported);
+    }
+    if hdr_source && !preserve_hdr {
+        reasons.push(VideoReason::Hdr(v.hdr.label()));
     }
 
     let bpp = media
@@ -649,12 +643,45 @@ fn plan_video(
     if reasons.is_empty() && !settings.allow_copy {
         reasons.push(VideoReason::ProfileForcesEncode);
     }
+    if preserve_hdr && !reasons.is_empty() {
+        warnings.push(PlanWarning::HdrPreserveNeedsCopy);
+        reasons.push(VideoReason::Hdr(v.hdr.label()));
+    }
+
+    let mut hdr = HdrConversion::None;
+    if hdr_source && !reasons.is_empty() {
+        if !(caps.zscale && caps.tonemap) {
+            blockers.push(PlanBlocker::TonemapUnavailable);
+        }
+        match &v.hdr {
+            HdrFormat::DolbyVision(dv) => {
+                if dv.compatibility == DvCompatibility::None || dv.profile == Some(5) {
+                    blockers.push(PlanBlocker::DolbyVisionProfile5);
+                }
+                warnings.push(PlanWarning::DolbyVisionMetadataDropped);
+            }
+            HdrFormat::Hdr10Plus => warnings.push(PlanWarning::Hdr10PlusMetadataDropped),
+            _ => {}
+        }
+        warnings.push(PlanWarning::HdrToneMapped {
+            format: v.hdr.label(),
+        });
+        hdr = HdrConversion::TonemapToSdr {
+            source: v.hdr.clone(),
+        };
+    }
 
     if !caps.libx264 && settings.codec == TargetVideoCodec::H264 && !reasons.is_empty() {
         blockers.push(PlanBlocker::EncoderUnavailable("libx264".into()));
     }
     if !caps.libx265 && settings.codec == TargetVideoCodec::Hevc && !reasons.is_empty() {
         blockers.push(PlanBlocker::EncoderUnavailable("libx265".into()));
+    }
+    if let Some(crop) = resolution.crop.filter(|_| !reasons.is_empty()) {
+        warnings.push(PlanWarning::BlackBarsCropped {
+            from: source,
+            to: crop.dimensions(),
+        });
     }
 
     let action = if reasons.is_empty() {

@@ -338,6 +338,7 @@ fn map_video(
             .map(|f| !matches!(f, "progressive" | "unknown")),
         default: s.flag("default"),
         attached_pic: s.flag("attached_pic"),
+        crop: None,
     }
 }
 

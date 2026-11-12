@@ -299,3 +299,30 @@ statt fest im Profil zu stehen.
 - GitHub-Actions-Workflow (`.github/workflows/ci.yml`): `cargo fmt --check`, Clippy mit
   `-D warnings`, `cargo test` mit installiertem ffmpeg (End-to-End-Tests laufen mit)
   sowie ein Build mit der Mindestversion 1.95.
+
+### Phase 10 – Schwarze Balken und HDR-Korrektur
+- **Behoben – „HDR erhalten“ ging beim Neu-Encodieren stillschweigend verloren:**
+  - Mit HEVC-Ziel und Strategie „HDR erhalten“ entfiel das Tonemapping. Der Encode schrieb
+    trotzdem 8 Bit `yuv420p` ohne BT.2020/PQ-Tags und ohne Mastering-Daten, also ein Bild
+    mit falschen Farben und Banding.
+  - HDR bleibt jetzt nur erhalten, wenn die Videospur kopiert wird. Sonst wird tonemappt,
+    mit dem Hinweis „HDR bleibt nur erhalten, wenn die Videospur unverändert kopiert wird“.
+  - Bezeichnung in den Profilen: „HDR erhalten (HEVC, nur beim Kopieren)“.
+- **Schwarze Balken erkennen und abschneiden** (neue Profiloption, Standard an, gilt
+  damit auch für bestehende Profile):
+  - Erkennung erst beim Start eines Jobs, nur wenn die Videospur neu encodiert wird:
+    `cropdetect` an 10 Stellen zwischen 10 % und 90 % des Films, nur Keyframes.
+  - Abgeschnitten wird nur, was an allen Stellen schwarz ist (Vereinigung der Bildbereiche).
+    Dunkle Szenen verkleinern das Bild nicht; bei wechselndem Seitenverhältnis bleibt das
+    volle Bild, sobald eine Stelle die größere Fläche zeigt.
+  - Sicherheitsregeln: mindestens die Hälfte der Stellen messbar, Balken unter 1 %
+    (mind. 8 px) bleiben, Restbild mindestens 40 % je Achse, gerade Werte nach außen
+    gerundet. Schlägt die Erkennung fehl, bleibt das volle Bild.
+  - `crop` steht vor der Skalierung: Eine UHD-Scope-Quelle 3840×2160 mit Balken wird
+    1920×800 statt 1920×1080. Smart CRF, Profil E und Validierung nutzen dasselbe Bild.
+  - Der Plan zeigt „Schwarze Balken entfernt: 3840×2160 → 3840×1600“. Balken allein lösen
+    kein Neu-Encodieren aus.
+- Neue Tests: Auswertung der `cropdetect`-Ausgabe (ffmpeg 4.4 und 8.x), Vereinigung und
+  Sicherheitsregeln, Zielauflösung mit Crop, HDR-Erhalt nur beim Kopieren, End-to-End-Test
+  mit Letterbox-Clip (640×360 → 640×264). Läuft mit ffmpeg 4.4 und 8.1.
+- Clippy 1.96 meldete ein verschachteltes `if` in `remove_work_dir` (Runner); zusammengefasst.

@@ -632,3 +632,67 @@ async fn auto_profile_picks_scenes_and_method() {
     }
     assert!(!runner::job_work_dir(&ctx.work_root, 12).exists());
 }
+
+/// 20 s MPEG-4 clip, 640×360 frame with a 640×264 picture (letterbox).
+fn make_letterboxed_mkv(dir: &Path) -> PathBuf {
+    let out = dir.join("source/Letterbox.mkv");
+    std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+    ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=640x264:rate=25:duration=20,pad=640:360:0:48:black",
+        "-c:v",
+        "mpeg4",
+        "-q:v",
+        "3",
+        "-g",
+        "25",
+        out.to_str().unwrap(),
+    ]);
+    out
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn black_bars_are_detected_and_cropped() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    make_letterboxed_mkv(dir.path());
+    let outcome = scan(&dir.path().join("source")).await;
+    let media = &outcome.files[0];
+    assert_eq!(
+        media.primary_video().unwrap().crop,
+        None,
+        "not part of the scan"
+    );
+
+    let caps = hardware::scan(Path::new("ffmpeg"), "/dev/dri/renderD128").await;
+    let profile = fast_profile();
+    let analysis = recommend::analyze(media, &profile, &caps.plan_capabilities());
+    let target = dir.path().join("target/Letterbox.mp4");
+    let job = Job::new(
+        1,
+        media.clone(),
+        target.clone(),
+        profile.id.clone(),
+        analysis.plan.clone(),
+    );
+    let ctx = context(dir.path(), caps, profile);
+    let result = runner::run_job(&ctx, &job, &ProcessHandle::new(), |_| {}).await;
+    assert_eq!(result.state, Some(JobState::Done), "{:?}", result.error);
+    assert!(result.validation.unwrap().passed());
+
+    let facts = FileFacts {
+        absolute_path: target.clone(),
+        relative_path: "x.mp4".into(),
+        size_bytes: 0,
+        modified_unix: 0,
+    };
+    let out = probe::analyze_file(Path::new("ffprobe"), &facts)
+        .await
+        .unwrap();
+    let v = out.primary_video().unwrap();
+    assert_eq!((v.width, v.height), (640, 264));
+}

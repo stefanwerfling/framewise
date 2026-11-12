@@ -1,4 +1,5 @@
 use super::*;
+use crate::analyzer::resolution::CropRect;
 use crate::encoding::plan::{PlanCapabilities, build_plan};
 use crate::media::fixtures::*;
 use crate::media::model::*;
@@ -314,4 +315,146 @@ fn hevc_cpu_is_tagged_and_throttled() {
         ["log-level=error:pools=4"]
     );
     assert!(value_after(&args, "-profile:v").is_empty());
+}
+
+fn hevc_preserve_profile() -> EncodingProfile {
+    let mut p = EncodingProfile::universal();
+    p.video.codec = TargetVideoCodec::Hevc;
+    p.hdr.strategy = crate::encoding::profile::HdrStrategy::Preserve;
+    p
+}
+
+fn encode_args(m: &MediaFile, plan: &EncodePlan, profile: &EncodingProfile) -> Vec<String> {
+    strings(&build_encode_args(&EncodeCommand {
+        media: m,
+        plan,
+        profile,
+        setup: &EncoderSetup::cpu(),
+        output: Path::new("/work/1/out.mp4"),
+        crf: None,
+        window: None,
+    }))
+}
+
+#[test]
+fn hdr_preserve_never_writes_hdr_as_8_bit() {
+    // UHD must be downscaled → re-encode → HDR cannot be kept.
+    let m = uhd_hdr();
+    let profile = hevc_preserve_profile();
+    let plan = build_plan(&m, &profile, &PlanCapabilities::default());
+    let Some(VideoAction::Encode { hdr, .. }) = plan.video.as_ref().map(|v| &v.action) else {
+        panic!("expected encode");
+    };
+    assert!(matches!(hdr, HdrConversion::TonemapToSdr { .. }));
+    assert!(
+        plan.warnings
+            .contains(&crate::encoding::plan::PlanWarning::HdrPreserveNeedsCopy)
+    );
+    let args = encode_args(&m, &plan, &profile);
+    assert!(value_after(&args, "-vf")[0].contains("tonemap="));
+    assert_eq!(value_after(&args, "-color_trc"), ["bt709"]);
+}
+
+#[test]
+fn hdr_preserve_copies_a_compatible_stream() {
+    let mut v = video("hevc", 1920, 1080);
+    v.bit_depth = Some(10);
+    v.pix_fmt = Some("yuv420p10le".into());
+    v.hdr = HdrFormat::Hdr10;
+    // ~4.4 Mbit/s: below the copy threshold
+    let m = media("mkv", 4_000_000_000, 7200.0, vec![v], vec![], vec![]);
+    let profile = hevc_preserve_profile();
+    let plan = build_plan(&m, &profile, &PlanCapabilities::default());
+    assert!(plan.video_is_copied());
+    assert!(!plan.warnings.iter().any(|w| matches!(
+        w,
+        crate::encoding::plan::PlanWarning::HdrPreserveNeedsCopy
+            | crate::encoding::plan::PlanWarning::HdrToneMapped { .. }
+    )));
+}
+
+fn letterboxed(width: u32, height: u32, crop: CropRect) -> MediaFile {
+    let mut v = video("mpeg2video", width, height);
+    v.crop = Some(crop);
+    media("mkv", 20_000_000_000, 7200.0, vec![v], vec![], vec![])
+}
+
+#[test]
+fn black_bars_are_cropped_before_scaling() {
+    let crop = CropRect {
+        width: 3840,
+        height: 1600,
+        x: 0,
+        y: 280,
+    };
+    let m = letterboxed(3840, 2160, crop);
+    let profile = EncodingProfile::universal();
+    let plan = build_plan(&m, &profile, &PlanCapabilities::default());
+    let vp = plan.video.as_ref().unwrap();
+    assert_eq!(vp.output_dimensions(), Dimensions::new(1920, 800));
+    assert!(
+        plan.warnings
+            .contains(&crate::encoding::plan::PlanWarning::BlackBarsCropped {
+                from: Dimensions::new(3840, 2160),
+                to: Dimensions::new(3840, 1600),
+            })
+    );
+    let vf = value_after(&encode_args(&m, &plan, &profile), "-vf").remove(0);
+    assert!(
+        vf.starts_with("crop=3840:1600:0:280,scale=1920:800:"),
+        "{vf}"
+    );
+
+    // The quality reference sees the same picture as the encoder.
+    let reference = strings(
+        &build_reference_args(
+            &EncodeCommand {
+                media: &m,
+                plan: &plan,
+                profile: &profile,
+                setup: &EncoderSetup::cpu(),
+                output: Path::new("/work/1/s.mkv"),
+                crf: None,
+                window: None,
+            },
+            Window {
+                start_s: 10.0,
+                duration_s: 5.0,
+            },
+            Path::new("/work/1/ref.mkv"),
+        )
+        .unwrap(),
+    );
+    assert_eq!(value_after(&reference, "-vf"), [vf]);
+}
+
+#[test]
+fn crop_is_off_when_disabled_or_stream_copied() {
+    let crop = CropRect {
+        width: 1920,
+        height: 800,
+        x: 0,
+        y: 140,
+    };
+    let m = letterboxed(1920, 1080, crop);
+    let mut profile = EncodingProfile::universal();
+    profile.video.auto_crop = false;
+    let plan = build_plan(&m, &profile, &PlanCapabilities::default());
+    assert_eq!(
+        plan.video.as_ref().unwrap().output_dimensions(),
+        Dimensions::new(1920, 1080)
+    );
+    assert!(!value_after(&encode_args(&m, &plan, &profile), "-vf")[0].contains("crop="));
+
+    // Bars alone are no reason to re-encode a compatible stream.
+    let mut v = video("h264", 1920, 1080);
+    v.crop = Some(crop);
+    let m = media("mkv", 4_000_000_000, 7200.0, vec![v], vec![], vec![]);
+    let plan = build_plan(
+        &m,
+        &EncodingProfile::universal(),
+        &PlanCapabilities::default(),
+    );
+    assert!(plan.video_is_copied());
+    assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
 }

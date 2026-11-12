@@ -15,6 +15,7 @@ in das Zielverzeichnis gelegt (gespiegelte Ordnerstruktur).
   Top-N je Ordner und Duplikaterkennung.
 - Profile A Universal, B High Quality, C Space Saver, D Custom und E Automatisch;
   max. 1080p, kein Upscaling.
+- Schwarze Balken werden vor dem Encodieren erkannt und abgeschnitten (abschaltbar).
 - Profil E gibt das Qualitätsziel vor, nicht das Verfahren (Standard: VMAF ≥ 95 an der
   schwächsten Probe, Analysebudget 30 min). Pro Film:
   - Proben an den aufwendigsten Stellen, ermittelt aus einer Komplexitätskarte

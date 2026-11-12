@@ -246,12 +246,30 @@ Dispositionen per `-disposition:X:N`.
 **Skalierung:** `scale=W:H:flags=lanczos` mit vorberechneten geraden Maßen
 (Seitenverhältnis inkl. SAR erhalten, nie Upscaling, kein Padding).
 
+**Schwarze Balken** (`encoding/crop.rs`, Profiloption, Standard an): Erst
+beim Start eines Jobs und nur, wenn die Videospur neu encodiert wird.
+`cropdetect` läuft an 10 Stellen zwischen 10 % und 90 % des Films, jeweils
+nur auf Keyframes. Abgeschnitten wird die **Vereinigung** aller erkannten
+Bildbereiche, also nur, was an jeder Stelle schwarz ist. Dunkle Szenen
+verkleinern das Bild dadurch nicht, und bei wechselndem Seitenverhältnis
+bleibt das größere Bild, sobald eine Stelle es zeigt. Weitere Regeln: mindestens
+die Hälfte der Stellen muss messbar sein, Balken unter 1 % (mind. 8 px) je
+Achse bleiben, das Restbild muss mindestens 40 % je Achse behalten, Werte
+werden nach außen auf gerade Zahlen gerundet. Der `crop`-Filter steht vor
+der Skalierung; die Qualitätsreferenz nutzt dieselbe Filterkette. Balken
+allein sind kein Grund, eine kopierbare Spur neu zu encodieren.
+
 **HDR → SDR** (zscale/zimg, wenn verfügbar):
 `zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p`
 plus Ausgabe-Tags `-color_primaries bt709 -color_trc bt709 -colorspace bt709`.
 Fehlt zscale, wird kein „stilles“ Metadaten-Entfernen gemacht – der Job wird
 mit verständlicher Meldung blockiert. Dolby Vision Profil 5 (kein
 HDR10-Basislayer) wird als nicht korrekt tonemapbar markiert.
+
+**HDR erhalten** (Strategie „Preserve“, nur mit HEVC-Ziel) wirkt nur, wenn die
+Videospur kopiert wird. Muss neu encodiert werden (Auflösung, Bitrate, Profil),
+wird tonemappt und das im Plan angezeigt; ein HDR-Encode in 10 Bit ist noch
+nicht umgesetzt.
 
 **Audio (Compatibility):** AAC/AC3/E-AC3 → copy; DTS/DTS-HD/TrueHD/FLAC/PCM
 mit >2 Kanälen → kompatible Mehrkanalspur (pro Profil wählbar: AC3 5.1 –

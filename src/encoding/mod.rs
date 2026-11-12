@@ -1,6 +1,7 @@
 //! Encoding engine: profiles, planning, ffmpeg commands and processes.
 
 pub mod command;
+pub mod crop;
 pub mod hardware;
 pub mod os;
 pub mod plan;

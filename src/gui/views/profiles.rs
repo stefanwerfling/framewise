@@ -198,6 +198,10 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
                     row(ui, tr!("Deinterlace"), |ui| {
                         ui.checkbox(&mut v.deinterlace, tr!("only frames flagged as interlaced"));
                     });
+                    row(ui, tr!("Black bars"), |ui| {
+                        ui.checkbox(&mut v.auto_crop, tr!("detect and crop before encoding"))
+                            .on_hover_text(tr!("Samples the film before encoding. Bars are only removed if they are present in every sample; with changing aspect ratios the full frame is kept."));
+                    });
                     row(ui, "Tune", |ui| {
                         let mut tune = v.tune.clone().unwrap_or_default();
                         egui::ComboBox::from_id_salt("tune")

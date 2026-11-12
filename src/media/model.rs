@@ -9,6 +9,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::analyzer::resolution::CropRect;
+
 use crate::{tr, trf};
 
 /// Rational number as used by ffprobe (`30000/1001`, `16:9`).
@@ -216,6 +218,10 @@ pub struct VideoStream {
     pub default: bool,
     /// Cover art etc. – not a real video track.
     pub attached_pic: bool,
+    /// Picture area without black bars. Not part of the scan: detected right
+    /// before encoding (see `encoding::crop`).
+    #[serde(default)]
+    pub crop: Option<CropRect>,
 }
 
 impl VideoStream {

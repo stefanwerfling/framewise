@@ -121,6 +121,9 @@ pub fn video_filters(
     if deinterlace {
         chain.push("bwdif=mode=send_frame:parity=auto:deint=interlaced".into());
     }
+    if let Some(c) = resolution.crop {
+        chain.push(format!("crop={}:{}:{}:{}", c.width, c.height, c.x, c.y));
+    }
     let out = resolution.output;
     match resolution.op {
         ResizeOp::Keep => {}

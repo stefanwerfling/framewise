@@ -19,6 +19,7 @@ use crate::core::error::{Error, Result};
 use crate::core::paths::numbered_variant;
 use crate::core::tools::ToolPaths;
 use crate::encoding::command::{self, EncodeCommand, EncoderSetup, Window};
+use crate::encoding::crop;
 use crate::encoding::hardware::HardwareCaps;
 use crate::encoding::plan::{self, EncodePlan, PlanWarning, VideoAction};
 use crate::encoding::process::{ProcessHandle, RunOptions, run_ffmpeg};
@@ -178,10 +179,12 @@ fn copy_synced(src: &Path, dst: &Path) -> io::Result<()> {
 
 /// Remove a job work directory – only if it really lies inside `work_root`.
 fn remove_work_dir(work_root: &Path, dir: &Path) {
-    if dir.starts_with(work_root) && dir != work_root && dir.exists() {
-        if let Err(e) = std::fs::remove_dir_all(dir) {
-            tracing::warn!("could not remove work dir {}: {e}", dir.display());
-        }
+    if dir.starts_with(work_root)
+        && dir != work_root
+        && dir.exists()
+        && let Err(e) = std::fs::remove_dir_all(dir)
+    {
+        tracing::warn!("could not remove work dir {}: {e}", dir.display());
     }
 }
 
@@ -233,6 +236,59 @@ where
     outcome
 }
 
+/// Detects black bars and stores them in `media`. Returns the new plan if
+/// the bars change it. Detection errors are logged and ignored (full frame).
+async fn detect_black_bars(
+    ctx: &RunnerContext,
+    media: &mut MediaFile,
+    plan: &EncodePlan,
+    handle: &ProcessHandle,
+) -> Result<Option<EncodePlan>> {
+    let Some(vp) = plan.video.as_ref() else {
+        return Ok(None);
+    };
+    if !ctx.profile.video.auto_crop || plan.video_is_copied() {
+        return Ok(None);
+    }
+    let Some(duration) = media.duration_s() else {
+        return Ok(None);
+    };
+    let crop = match crop::detect(
+        &ctx.tools.ffmpeg,
+        &media.absolute_path,
+        vp.source_type_index,
+        vp.source,
+        duration,
+        handle,
+    )
+    .await
+    {
+        Ok(crop) => crop,
+        Err(Error::Cancelled) => return Err(Error::Cancelled),
+        Err(e) => {
+            tracing::warn!("black bar detection failed: {e}");
+            None
+        }
+    };
+    let Some(stream) = media
+        .video
+        .iter_mut()
+        .find(|v| v.type_index == vp.source_type_index && !v.attached_pic)
+    else {
+        return Ok(None);
+    };
+    stream.crop = crop;
+    if crop.is_none() {
+        return Ok(None);
+    }
+    let cropped = plan::build_plan(media, &ctx.profile, &ctx.caps.plan_capabilities());
+    if cropped.is_blocked() || cropped == *plan {
+        return Ok(None);
+    }
+    tracing::info!("black bars detected: {:?}", crop);
+    Ok(Some(cropped))
+}
+
 async fn run_inner<F>(
     ctx: &RunnerContext,
     job: &Job,
@@ -249,7 +305,7 @@ where
 
     // 1. Source still there and unchanged?
     let facts = file_facts(&job.media).map_err(|e| Error::io(&job.media.absolute_path, e))?;
-    let (media, mut plan) = if facts.size_bytes != job.media.size_bytes
+    let (mut media, mut plan) = if facts.size_bytes != job.media.size_bytes
         || facts.modified_unix != job.media.modified_unix
     {
         tracing::info!(
@@ -281,6 +337,12 @@ where
     tokio::fs::create_dir_all(work_dir)
         .await
         .map_err(|e| Error::io(work_dir, e))?;
+
+    // Black bars: measured only for files that are actually re-encoded.
+    if let Some(cropped) = detect_black_bars(ctx, &mut media, &plan, handle).await? {
+        plan = cropped;
+        emit(RunnerEvent::Replanned(Box::new(plan.clone())));
+    }
 
     let encode_codec =
         |plan: &EncodePlan, profile: &EncodingProfile| match plan.video.as_ref().map(|v| &v.action)

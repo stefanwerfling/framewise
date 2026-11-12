@@ -5,7 +5,9 @@
 //! * sources smaller than the box are **never** upscaled,
 //! * aspect ratio is always preserved (no padding, no distortion),
 //! * odd dimensions are made even (required for 4:2:0) – by cropping a single
-//!   line when no scaling happens, so no resampling is introduced.
+//!   line when no scaling happens, so no resampling is introduced,
+//! * detected black bars ([`CropRect`]) are cut off first; the rules above
+//!   then apply to the remaining picture.
 
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +33,30 @@ impl std::fmt::Display for Dimensions {
     }
 }
 
+/// Picture area without black bars, in displayed (rotated) source pixels.
+/// Offsets and size are even, as 4:2:0 chroma requires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CropRect {
+    pub width: u32,
+    pub height: u32,
+    pub x: u32,
+    pub y: u32,
+}
+
+impl CropRect {
+    pub fn dimensions(self) -> Dimensions {
+        Dimensions::new(self.width, self.height)
+    }
+
+    /// Non-empty and inside a frame of size `source`.
+    pub fn fits(self, source: Dimensions) -> bool {
+        self.width > 0
+            && self.height > 0
+            && self.x + self.width <= source.width
+            && self.y + self.height <= source.height
+    }
+}
+
 /// How the output size is obtained from the source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResizeOp {
@@ -45,6 +71,9 @@ pub enum ResizeOp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TargetResolution {
     pub source: Dimensions,
+    /// Black bars cut off before scaling (`None` = full frame).
+    #[serde(default)]
+    pub crop: Option<CropRect>,
     pub output: Dimensions,
     pub op: ResizeOp,
 }
@@ -71,6 +100,7 @@ pub fn compute_target(source: Dimensions, max: Dimensions) -> TargetResolution {
     if source.width == 0 || source.height == 0 {
         return TargetResolution {
             source,
+            crop: None,
             output: source,
             op: ResizeOp::Keep,
         };
@@ -83,7 +113,12 @@ pub fn compute_target(source: Dimensions, max: Dimensions) -> TargetResolution {
         } else {
             ResizeOp::CropToEven
         };
-        return TargetResolution { source, output, op };
+        return TargetResolution {
+            source,
+            crop: None,
+            output,
+            op,
+        };
     }
 
     // Keep the limiting dimension exact, derive the other one.
@@ -100,8 +135,26 @@ pub fn compute_target(source: Dimensions, max: Dimensions) -> TargetResolution {
     };
     TargetResolution {
         source,
+        crop: None,
         output,
         op: ResizeOp::Downscale,
+    }
+}
+
+/// Like [`compute_target`], but cuts off `crop` first. A crop that does not
+/// fit the source is ignored.
+pub fn compute_target_cropped(
+    source: Dimensions,
+    crop: Option<CropRect>,
+    max: Dimensions,
+) -> TargetResolution {
+    let Some(crop) = crop.filter(|c| c.fits(source) && c.dimensions() != source) else {
+        return compute_target(source, max);
+    };
+    TargetResolution {
+        source,
+        crop: Some(crop),
+        ..compute_target(crop.dimensions(), max)
     }
 }
 
@@ -162,6 +215,58 @@ mod tests {
         for (w, h) in [(320, 240), (640, 360), (1024, 576), (1918, 1080)] {
             let (d, _) = fhd(w, h);
             assert!(d.width <= w && d.height <= h);
+        }
+    }
+
+    #[test]
+    fn crop_applies_before_the_bounding_box() {
+        let max = Dimensions::new(1920, 1080);
+        // UHD scope film with letterbox: 3840×1600 picture inside 3840×2160.
+        let crop = CropRect {
+            width: 3840,
+            height: 1600,
+            x: 0,
+            y: 280,
+        };
+        let t = compute_target_cropped(Dimensions::new(3840, 2160), Some(crop), max);
+        assert_eq!(t.crop, Some(crop));
+        assert_eq!(t.source, Dimensions::new(3840, 2160));
+        assert_eq!(
+            (t.output, t.op),
+            (Dimensions::new(1920, 800), ResizeOp::Downscale)
+        );
+        // 1080p letterbox: crop only, no scaling.
+        let crop = CropRect {
+            width: 1920,
+            height: 800,
+            x: 0,
+            y: 140,
+        };
+        let t = compute_target_cropped(Dimensions::new(1920, 1080), Some(crop), max);
+        assert_eq!(
+            (t.output, t.op),
+            (Dimensions::new(1920, 800), ResizeOp::Keep)
+        );
+    }
+
+    #[test]
+    fn invalid_or_full_frame_crop_is_ignored() {
+        let max = Dimensions::new(1920, 1080);
+        let source = Dimensions::new(1920, 1080);
+        let outside = CropRect {
+            width: 1920,
+            height: 800,
+            x: 0,
+            y: 400,
+        };
+        let full = CropRect {
+            width: 1920,
+            height: 1080,
+            x: 0,
+            y: 0,
+        };
+        for c in [outside, full] {
+            assert_eq!(compute_target_cropped(source, Some(c), max).crop, None);
         }
     }
 
