@@ -25,6 +25,7 @@ pub fn video(codec: &str, width: u32, height: u32) -> VideoStream {
         default: true,
         attached_pic: false,
         crop: None,
+        hdr_metadata: None,
     }
 }
 

@@ -326,3 +326,36 @@ statt fest im Profil zu stehen.
   Sicherheitsregeln, Zielauflösung mit Crop, HDR-Erhalt nur beim Kopieren, End-to-End-Test
   mit Letterbox-Clip (640×360 → 640×264). Läuft mit ffmpeg 4.4 und 8.1.
 - Clippy 1.96 meldete ein verschachteltes `if` in `remove_work_dir` (Runner); zusammengefasst.
+
+### Phase 11 – 10 Bit und HDR erhalten
+- **HEVC in 10 Bit** (neue Profiloption, Standard an): CPU-Encodes mit libx265 schreiben
+  Main 10 (`yuv420p10le`) – weniger Banding in Verläufen und dunklen Szenen. Hardware-Encoder
+  bleiben bei SDR auf 8 Bit, H.264 immer. Gilt auch für den HEVC-Kandidaten von Profil E.
+  Referenz (FFV1) und Messung der Qualitätssuche nutzen dasselbe Format; VMAF und SSIM
+  messen in 10 Bit.
+- **HDR10 und HLG bleiben auch beim Neu-Encodieren erhalten** (Strategie „HDR erhalten
+  (HEVC 10 Bit)“):
+  - libx265 auf der CPU, BT.2020-Tags im Container und im Bitstream, bei PQ `hdr10=1`,
+    `master-display` und `max-cll` aus der Quelle. Hardware-Encoder werden dafür übergangen.
+  - Mastering-Display und MaxCLL liest der Runner beim Job-Start (Container-Side-Data,
+    sonst die ersten 5 Frames). Der Scan bleibt unverändert.
+  - HDR10+ und Dolby Vision mit HDR10-/HLG-Basis werden als HDR10 bzw. HLG erhalten, mit
+    Hinweis, dass die dynamischen Metadaten entfallen. Dolby Vision Profil 5 und unbekannte
+    Formate werden weiter tonemappt.
+  - Kann libx265 kein 10 Bit (Hardware-Scan liest `ffmpeg -h encoder=libx265`), wird
+    tonemappt, mit Hinweis.
+  - Profil E sucht bei „HDR erhalten“ nur HEVC, da H.264 kein HDR tragen kann; die
+    Kopier-Prüfung nutzt dann ebenfalls das HEVC-Ziel.
+- **Behoben – mögliches Dolby-Vision-Kennzeichen ohne passende Metadaten:** libx265 hat ab
+  ffmpeg 7 die Option `-dolbyvision` mit Standard „auto“. Bei Dolby-Vision-Quellen
+  hätte das Ergebnis Dolby Vision signalisieren können, obwohl das Bild tonemappt oder nur
+  die Basis erhalten wurde. Ist die Option vorhanden, wird jetzt `-dolbyvision 0` gesetzt.
+- **Neue Validierungsprüfung „Dynamikumfang“:** Beim HDR-Erhalt muss das Ergebnis HDR10
+  bzw. HLG in 10 Bit sein, sonst SDR. Ein übrig gebliebenes HDR- oder Dolby-Vision-Signal
+  auf einem tonemappten Bild lässt den Job jetzt scheitern.
+- Der Hinweis „HDR bleibt nur beim Kopieren erhalten“ aus Phase 10 entfällt.
+- Neue Tests: Mastering-/MaxCLL-Parser (Container und Frames, ffmpeg 8.1-Reihenfolge),
+  x265-Fähigkeiten, Argumente für HDR10/HLG/Dolby Vision, 10 Bit nur auf der CPU,
+  Rückfall ohne 10-Bit-x265, Validierung des Dynamikumfangs, End-to-End-Test: HDR10-Clip
+  mit Mastering-Daten → HEVC 10 Bit, Metadaten im Ergebnis identisch. Läuft mit ffmpeg 4.4
+  und 8.1.

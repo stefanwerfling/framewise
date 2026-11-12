@@ -151,16 +151,18 @@ pub fn parse_vmaf(stderr: &str) -> Option<f64> {
 
 /// Reference pre-processing: the same deinterlace/scale/tonemap as the encode,
 /// so the metric measures encoding loss only.
-fn reference_filters(plan: &EncodePlan, profile: &EncodingProfile) -> String {
+fn reference_filters(plan: &EncodePlan, profile: &EncodingProfile, setup: &EncoderSetup) -> String {
+    let ten_bit = command::encodes_10bit(plan, setup);
+    let format = || format!("format={}", command::pix_fmt(ten_bit));
     match plan.video.as_ref().map(|v| &v.action) {
         Some(VideoAction::Encode {
             resolution,
             hdr,
             deinterlace,
             ..
-        }) => command::video_filters(resolution, hdr, *deinterlace, profile, None)
-            .unwrap_or_else(|| "format=yuv420p".into()),
-        _ => "format=yuv420p".into(),
+        }) => command::video_filters(resolution, hdr, *deinterlace, profile, None, ten_bit)
+            .unwrap_or_else(format),
+        _ => format(),
     }
 }
 
@@ -215,6 +217,12 @@ impl QualityContext<'_> {
             .collect()
     }
 
+    /// Pixel format both inputs are compared in: the encoder's output format
+    /// (the reference filters end in the same format).
+    fn measure_format(&self) -> &'static str {
+        command::pix_fmt(command::encodes_10bit(self.plan, self.setup))
+    }
+
     /// Source/reference input and the filters that turn it into the
     /// encoder's view: (path, seek window, video stream index, filters).
     fn reference_input<'r>(
@@ -226,7 +234,7 @@ impl QualityContext<'_> {
                 self.media.absolute_path.as_path(),
                 Some(window),
                 self.plan.video.as_ref().map_or(0, |v| v.source_type_index),
-                reference_filters(self.plan, self.profile),
+                reference_filters(self.plan, self.profile, self.setup),
             ),
             // Already filtered to the encoder's input format.
             Reference::Prefiltered(path) => (path, None, 0, "null".to_string()),
@@ -288,6 +296,7 @@ impl QualityContext<'_> {
         handle: &ProcessHandle,
     ) -> Result<f64> {
         let (ref_input, ref_window, ref_stream, ref_filters) = self.reference_input(reference);
+        let fmt = self.measure_format();
         // libvmaf is single-threaded by default; follow the configured CPU
         // thread limit (0 = all cores) so the measurement stays throttled too
         let threads = if self.setup.threads > 0 {
@@ -308,7 +317,7 @@ impl QualityContext<'_> {
         };
         let (dskip, rskip) = (skip(offset), skip(-offset));
         let graph = format!(
-            "[0:v:0]{dskip}format=yuv420p,{PAIR_BY_NUMBER}[dist];[1:v:{ref_stream}]{ref_filters},{rskip}{PAIR_BY_NUMBER}[ref];[dist][ref]{compare}"
+            "[0:v:0]{dskip}format={fmt},{PAIR_BY_NUMBER}[dist];[1:v:{ref_stream}]{ref_filters},{rskip}{PAIR_BY_NUMBER}[ref];[dist][ref]{compare}"
         );
         let inputs = input_args(distorted, distorted_window, ref_input, ref_window);
         let stderr = self.run_measurement(inputs, graph, &[""], handle).await?;
@@ -337,9 +346,10 @@ impl QualityContext<'_> {
     ) -> Result<i32> {
         let (ref_input, ref_window, ref_stream, ref_filters) =
             self.reference_input(Reference::Source(window));
+        let fmt = self.measure_format();
         let n = ALIGN_FRAMES + 1;
         let graph = format!(
-            "[0:v:0]format=yuv420p,{PAIR_BY_NUMBER},trim=end_frame={n},split=3[d0][d1][d2];\
+            "[0:v:0]format={fmt},{PAIR_BY_NUMBER},trim=end_frame={n},split=3[d0][d1][d2];\
              [1:v:{ref_stream}]{ref_filters},{PAIR_BY_NUMBER},trim=end_frame={n},split=3[r0][r1][r2];\
              [r0]trim=start_frame=1,setpts=N[r0s];[d0][r0s]ssim=shortest=1[o0];\
              [d1][r1]ssim=shortest=1[o1];\

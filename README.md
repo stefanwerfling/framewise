@@ -24,7 +24,9 @@ in das Zielverzeichnis gelegt (gespiegelte Ordnerstruktur).
     mindestens 15 % Ersparnis
   - Videospur kopieren, wenn kein Verfahren mindestens 10 % spart
   - Die Entscheidung wird im Job gespeichert und in Queue und Historie angezeigt.
-- HDR → SDR-Tonemapping; Smart CRF über SSIM bzw. VMAF.
+- HDR → SDR-Tonemapping oder HDR10/HLG erhalten (HEVC 10 Bit mit Mastering-Metadaten);
+  Smart CRF über SSIM bzw. VMAF.
+- HEVC auf der CPU in 10 Bit für weniger Banding (abschaltbar).
 - Das Arbeitsverzeichnis liegt standardmäßig auf dem Ziel-Laufwerk
   (`<Ziel>/.framewise-work`), damit fertige Dateien nur umbenannt statt kopiert werden.
 - Hardware-Encoding (NVENC, QSV, VAAPI, AMF, VideoToolbox) nach Funktionstest zur Laufzeit,

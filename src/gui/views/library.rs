@@ -823,18 +823,23 @@ fn details(ui: &mut egui::Ui, e: &LibraryEntry) {
                         resolution,
                         hdr,
                         deinterlace,
+                        ten_bit,
                     } => trf!(
                         "Video: {} CRF {} → {}{}{}",
                         codec.label(),
                         crf,
                         resolution.output,
-                        if matches!(
-                            hdr,
-                            crate::encoding::plan::HdrConversion::TonemapToSdr { .. }
-                        ) {
-                            " · HDR→SDR"
-                        } else {
-                            ""
+                        {
+                            use crate::encoding::plan::{HdrConversion, HdrTransfer};
+                            let range = match hdr {
+                                HdrConversion::TonemapToSdr { .. } => " · HDR→SDR".to_string(),
+                                HdrConversion::Preserve { source } => HdrTransfer::of(source)
+                                    .map(|t| format!(" · {}", t.label()))
+                                    .unwrap_or_default(),
+                                HdrConversion::None => String::new(),
+                            };
+                            let depth = if *ten_bit { " · 10 bit" } else { "" };
+                            format!("{range}{depth}")
                         },
                         if *deinterlace { " · deinterlace" } else { "" }
                     ),

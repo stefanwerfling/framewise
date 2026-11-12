@@ -198,6 +198,10 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
                     row(ui, tr!("Deinterlace"), |ui| {
                         ui.checkbox(&mut v.deinterlace, tr!("only frames flagged as interlaced"));
                     });
+                    row(ui, tr!("HEVC 10 bit"), |ui| {
+                        ui.checkbox(&mut v.hevc_10bit, tr!("CPU encodes in 10 bit"))
+                            .on_hover_text(tr!("Less banding in gradients and dark scenes. Hardware encoders stay at 8 bit for SDR; keeping HDR always uses 10 bit."));
+                    });
                     row(ui, tr!("Black bars"), |ui| {
                         ui.checkbox(&mut v.auto_crop, tr!("detect and crop before encoding"))
                             .on_hover_text(tr!("Samples the film before encoding. Bars are only removed if they are present in every sample; with changing aspect ratios the full frame is kept."));

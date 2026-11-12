@@ -15,7 +15,7 @@ use framewise::core::tools::ToolPaths;
 use framewise::encoding::hardware::{self, HardwareCaps};
 use framewise::encoding::plan::{AudioPurpose, VideoAction};
 use framewise::encoding::process::ProcessHandle;
-use framewise::encoding::profile::{EncodingProfile, QualityMetric, TargetVideoCodec};
+use framewise::encoding::profile::{EncodingProfile, HdrStrategy, QualityMetric, TargetVideoCodec};
 use framewise::encoding::quality::AutoChoice;
 use framewise::media::model::{AudioCodec, HdrFormat, SubtitleCodec, VideoCodec};
 use framewise::media::probe::{self, FileFacts};
@@ -128,6 +128,10 @@ fn make_legacy_mkv(dir: &Path) -> PathBuf {
 }
 
 /// 10-bit HEVC tagged as HDR10 (PQ / BT.2020).
+const MASTER_DISPLAY: &str =
+    "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,50)";
+
+/// 3 s HDR10 clip (PQ, BT.2020, 10 bit) with mastering display and MaxCLL.
 fn make_hdr_mkv(dir: &Path) -> PathBuf {
     let out = dir.join("source/UHD/HDR Clip.MKV");
     std::fs::create_dir_all(out.parent().unwrap()).unwrap();
@@ -153,7 +157,10 @@ fn make_hdr_mkv(dir: &Path) -> PathBuf {
         "-pix_fmt",
         "yuv420p10le",
         "-x265-params",
-        "log-level=error:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc",
+        &format!(
+            "log-level=error:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:\
+             hdr10=1:master-display={MASTER_DISPLAY}:max-cll=1000,400"
+        ),
         "-color_primaries",
         "bt2020",
         "-color_trc",
@@ -616,7 +623,12 @@ async fn auto_profile_picks_scenes_and_method() {
     );
     let codec = &out.primary_video().unwrap().codec;
     match auto.choice {
-        AutoChoice::Encode(TargetVideoCodec::Hevc) => assert_eq!(*codec, VideoCodec::Hevc),
+        AutoChoice::Encode(TargetVideoCodec::Hevc) => {
+            assert_eq!(*codec, VideoCodec::Hevc);
+            if caps.libx265_10bit {
+                assert_eq!(out.primary_video().unwrap().bit_depth, Some(10));
+            }
+        }
         AutoChoice::Encode(TargetVideoCodec::H264) | AutoChoice::CopyVideo => {
             assert_eq!(*codec, VideoCodec::H264)
         }
@@ -695,4 +707,60 @@ async fn black_bars_are_detected_and_cropped() {
         .unwrap();
     let v = out.primary_video().unwrap();
     assert_eq!((v.width, v.height), (640, 264));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hdr10_is_kept_in_10_bit_with_metadata() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let caps = hardware::scan(Path::new("ffmpeg"), "/dev/dri/renderD128").await;
+    if !caps.libx265_10bit {
+        eprintln!("libx265 without 10 bit – skipping HDR preserve test");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    make_hdr_mkv(dir.path());
+    let outcome = scan(&dir.path().join("source")).await;
+    let media = &outcome.files[0];
+    assert_eq!(media.primary_video().unwrap().hdr, HdrFormat::Hdr10);
+
+    let mut profile = fast_profile();
+    profile.video.codec = TargetVideoCodec::Hevc;
+    profile.video.allow_copy = false;
+    profile.hdr.strategy = HdrStrategy::Preserve;
+    let analysis = recommend::analyze(media, &profile, &caps.plan_capabilities());
+    let target = dir.path().join("target/UHD/HDR Clip.mp4");
+    let job = Job::new(
+        1,
+        media.clone(),
+        target.clone(),
+        profile.id.clone(),
+        analysis.plan.clone(),
+    );
+    let ctx = context(dir.path(), caps, profile);
+    let result = runner::run_job(&ctx, &job, &ProcessHandle::new(), |_| {}).await;
+    assert_eq!(result.state, Some(JobState::Done), "{:?}", result.error);
+    let report = result.validation.unwrap();
+    assert!(report.passed(), "{report:#?}");
+
+    let facts = FileFacts {
+        absolute_path: target.clone(),
+        relative_path: "x.mp4".into(),
+        size_bytes: 0,
+        modified_unix: 0,
+    };
+    let out = probe::analyze_file(Path::new("ffprobe"), &facts)
+        .await
+        .unwrap();
+    let v = out.primary_video().unwrap();
+    assert_eq!(v.codec, VideoCodec::Hevc);
+    assert_eq!(v.hdr, HdrFormat::Hdr10);
+    assert_eq!(v.bit_depth, Some(10));
+    assert_eq!(v.color.primaries.as_deref(), Some("bt2020"));
+    let meta = probe::probe_hdr_metadata(Path::new("ffprobe"), &target, 0)
+        .await
+        .unwrap();
+    assert_eq!(meta.mastering.unwrap().x265(), MASTER_DISPLAY);
+    assert_eq!(meta.max_cll, Some((1000, 400)));
 }

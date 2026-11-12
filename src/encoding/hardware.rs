@@ -108,6 +108,12 @@ pub struct HardwareCaps {
     pub tests: Vec<EncoderTest>,
     pub gpus: Vec<GpuInfo>,
     pub render_devices: Vec<PathBuf>,
+    /// libx265 accepts `yuv420p10le` (HEVC Main 10).
+    #[serde(default)]
+    pub libx265_10bit: bool,
+    /// libx265 has the `-dolbyvision` option (ffmpeg ≥ 7; default "auto").
+    #[serde(default)]
+    pub libx265_dolbyvision: bool,
 }
 
 impl HardwareCaps {
@@ -121,6 +127,7 @@ impl HardwareCaps {
             tonemap: self.has_filter("tonemap"),
             libx264: self.encoders.contains("libx264"),
             libx265: self.encoders.contains("libx265"),
+            libx265_10bit: self.libx265_10bit,
         }
     }
 
@@ -204,7 +211,7 @@ async fn listing(ffmpeg: &Path, flag: &str) -> String {
     match run_capture(
         "ffmpeg",
         ffmpeg,
-        ["-hide_banner", flag],
+        std::iter::once("-hide_banner").chain(flag.split_whitespace()),
         Duration::from_secs(15),
         flag,
     )
@@ -216,6 +223,18 @@ async fn listing(ffmpeg: &Path, flag: &str) -> String {
             String::new()
         }
     }
+}
+
+/// libx265 details from `ffmpeg -h encoder=libx265`: (10 bit, -dolbyvision).
+pub fn parse_x265_help(help: &str) -> (bool, bool) {
+    let ten_bit = help
+        .lines()
+        .find(|l| l.trim_start().starts_with("Supported pixel formats:"))
+        .is_some_and(|l| l.split_whitespace().any(|f| f == "yuv420p10le"));
+    let dolbyvision = help
+        .lines()
+        .any(|l| l.trim_start().starts_with("-dolbyvision "));
+    (ten_bit, dolbyvision)
 }
 
 /// Arguments for a one-frame functional test of an encoder.
@@ -335,7 +354,13 @@ pub async fn scan(ffmpeg: &Path, vaapi_device: &str) -> HardwareCaps {
         gpus,
         render_devices: detect_render_devices(),
         tests: Vec::new(),
+        libx265_10bit: false,
+        libx265_dolbyvision: false,
     };
+    if caps.encoders.contains("libx265") {
+        let help = listing(ffmpeg, "-h encoder=libx265").await;
+        (caps.libx265_10bit, caps.libx265_dolbyvision) = parse_x265_help(&help);
+    }
 
     for backend in AUTO_ORDER {
         for codec in [TargetVideoCodec::H264, TargetVideoCodec::Hevc] {
@@ -444,5 +469,14 @@ mod tests {
             caps.resolve_decoder(HwBackend::Auto),
             Some(HwBackend::Nvidia)
         );
+    }
+
+    #[test]
+    fn x265_help_reveals_10_bit_and_dolby_vision() {
+        let old = "Encoder libx265 [libx265 H.265 / HEVC]:\n    Supported pixel formats: yuv420p yuvj420p yuv420p10le gray\nlibx265 AVOptions:\n  -crf               <float>      E..V.......\n";
+        assert_eq!(parse_x265_help(old), (true, false));
+        let new = "    Supported pixel formats: yuv420p yuv444p\n  -dolbyvision       <boolean>    E..V....... Enable Dolby Vision RPU coding (default auto)\n";
+        assert_eq!(parse_x265_help(new), (false, true));
+        assert_eq!(parse_x265_help(""), (false, false));
     }
 }

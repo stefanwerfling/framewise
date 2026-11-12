@@ -266,10 +266,28 @@ Fehlt zscale, wird kein „stilles“ Metadaten-Entfernen gemacht – der Job wi
 mit verständlicher Meldung blockiert. Dolby Vision Profil 5 (kein
 HDR10-Basislayer) wird als nicht korrekt tonemapbar markiert.
 
-**HDR erhalten** (Strategie „Preserve“, nur mit HEVC-Ziel) wirkt nur, wenn die
-Videospur kopiert wird. Muss neu encodiert werden (Auflösung, Bitrate, Profil),
-wird tonemappt und das im Plan angezeigt; ein HDR-Encode in 10 Bit ist noch
-nicht umgesetzt.
+**HDR erhalten** (Strategie „Preserve“, HEVC-Ziel): Eine passende Spur wird
+kopiert. Muss neu encodiert werden, entsteht HEVC Main 10 mit libx265 auf der
+CPU (Hardware-Encoder werden dafür übergangen):
+* `-pix_fmt yuv420p10le`, Container-Tags `bt2020`/`smpte2084` bzw.
+  `arib-std-b67`/`bt2020nc`/`tv`.
+* `x265-params`: `colorprim`, `transfer`, `colormatrix`, `range`; bei PQ
+  zusätzlich `hdr10=1:hdr10-opt=1`, `master-display` und `max-cll` aus der
+  Quelle. Diese Werte liest der Runner erst beim Job-Start per ffprobe
+  (Container-Side-Data vor den ersten Frames), damit Scan-Caches gültig bleiben.
+* HDR10+ und Dolby Vision (Profil 7/8 mit HDR10- bzw. HLG-Basis) werden als
+  HDR10 bzw. HLG erhalten, die dynamischen Metadaten entfallen (Hinweis im
+  Plan). Dolby Vision Profil 5 und unbekannte Formate werden tonemappt.
+* `-dolbyvision 0`, wenn libx265 die Option kennt (ffmpeg ≥ 7, Standard
+  „auto“): Das Ergebnis gibt nie Dolby Vision vor.
+* Kann libx265 kein 10 Bit, wird tonemappt (Hinweis im Plan).
+* Die Validierung prüft den Dynamikumfang: HDR10/HLG in 10 Bit beim Erhalt,
+  sonst SDR.
+* Profil E sucht in diesem Fall nur HEVC, weil H.264 kein HDR tragen kann.
+
+**10 Bit für SDR** (Profiloption, Standard an): HEVC-Encodes auf der CPU
+laufen in 10 Bit (weniger Banding). Hardware-Encoder bleiben bei SDR auf 8 Bit,
+H.264 immer. Referenz und Messung der Qualitätssuche nutzen dasselbe Format.
 
 **Audio (Compatibility):** AAC/AC3/E-AC3 → copy; DTS/DTS-HD/TrueHD/FLAC/PCM
 mit >2 Kanälen → kompatible Mehrkanalspur (pro Profil wählbar: AC3 5.1 –

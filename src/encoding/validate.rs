@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::plan::{EncodePlan, SubtitleAction, VideoAction};
+use super::plan::{EncodePlan, HdrConversion, HdrTransfer, SubtitleAction, VideoAction};
 use super::process::{ProcessHandle, RunOptions, run_ffmpeg};
 use super::profile::TargetVideoCodec;
-use crate::media::model::{MediaFile, VideoCodec};
+use crate::media::model::{HdrFormat, MediaFile, VideoCodec};
 use crate::media::probe::{self, FileFacts};
 use crate::tr;
 
@@ -21,6 +21,7 @@ pub enum CheckKind {
     VideoStream,
     VideoCodec,
     Resolution,
+    DynamicRange,
     AudioStreams,
     AudioLanguages,
     AudioTitles,
@@ -41,6 +42,7 @@ impl CheckKind {
             CheckKind::VideoStream => tr!("Video stream"),
             CheckKind::VideoCodec => tr!("Video codec"),
             CheckKind::Resolution => tr!("Resolution"),
+            CheckKind::DynamicRange => tr!("Dynamic range"),
             CheckKind::AudioStreams => tr!("Audio streams"),
             CheckKind::AudioLanguages => tr!("Audio languages"),
             CheckKind::AudioTitles => tr!("Audio track titles"),
@@ -142,6 +144,37 @@ pub fn compare(plan: &EncodePlan, source: &MediaFile, output: &MediaFile) -> Vec
             expected,
             actual,
         ));
+        // Encodes: HDR kept as planned (10 bit), or SDR – never a leftover
+        // HDR/Dolby Vision signal on a tone-mapped picture.
+        if let VideoAction::Encode { hdr, .. } = &vp.action {
+            let actual = match ov.bit_depth {
+                Some(b) => format!("{} · {b} bit", ov.hdr.label()),
+                None => ov.hdr.label(),
+            };
+            let (expected, passed) = match hdr {
+                HdrConversion::Preserve { source } => {
+                    let t = HdrTransfer::of(source);
+                    let ok = match t {
+                        Some(HdrTransfer::Pq) => ov.hdr == HdrFormat::Hdr10,
+                        Some(HdrTransfer::Hlg) => ov.hdr == HdrFormat::Hlg,
+                        None => false,
+                    };
+                    (
+                        format!("{} · 10 bit", t.map_or("HDR", |t| t.label())),
+                        ok && ov.bit_depth == Some(10),
+                    )
+                }
+                HdrConversion::TonemapToSdr { .. } | HdrConversion::None => {
+                    ("SDR".to_string(), ov.hdr == HdrFormat::Sdr)
+                }
+            };
+            checks.push(ValidationCheck::new(
+                CheckKind::DynamicRange,
+                passed,
+                expected,
+                actual,
+            ));
+        }
     }
 
     // audio
@@ -473,5 +506,40 @@ mod tests {
     #[test]
     fn empty_report_is_not_passed() {
         assert!(!ValidationReport::default().passed());
+    }
+
+    #[test]
+    fn dynamic_range_must_match_the_plan() {
+        // Tone-mapped plan, but the output still signals HDR.
+        let mut src = source();
+        src.video[0].hdr = HdrFormat::Hdr10;
+        let plan = build_plan(
+            &src,
+            &EncodingProfile::universal(),
+            &PlanCapabilities::default(),
+        );
+        let mut out = good_output();
+        out.video[0].hdr = HdrFormat::Hdr10;
+        let failed = |out: &MediaFile, plan: &EncodePlan| {
+            compare(plan, &src, out)
+                .iter()
+                .any(|c| c.kind == CheckKind::DynamicRange && !c.passed)
+        };
+        assert!(failed(&out, &plan));
+        out.video[0].hdr = HdrFormat::Sdr;
+        assert!(!failed(&out, &plan));
+
+        // HDR kept: HDR10 in 10 bit expected.
+        let mut keep = EncodingProfile::universal();
+        keep.video.codec = TargetVideoCodec::Hevc;
+        keep.hdr.strategy = crate::encoding::profile::HdrStrategy::Preserve;
+        let plan = build_plan(&src, &keep, &PlanCapabilities::default());
+        let mut out = good_output();
+        out.video[0] = video("hevc", 1920, 1080);
+        out.video[0].hdr = HdrFormat::Hdr10;
+        out.video[0].bit_depth = Some(8);
+        assert!(failed(&out, &plan));
+        out.video[0].bit_depth = Some(10);
+        assert!(!failed(&out, &plan));
     }
 }

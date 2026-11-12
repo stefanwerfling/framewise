@@ -25,6 +25,8 @@ pub struct PlanCapabilities {
     pub tonemap: bool,
     pub libx264: bool,
     pub libx265: bool,
+    /// libx265 can encode 10 bit (needed to keep HDR).
+    pub libx265_10bit: bool,
 }
 
 impl Default for PlanCapabilities {
@@ -35,6 +37,7 @@ impl Default for PlanCapabilities {
             tonemap: true,
             libx264: true,
             libx265: true,
+            libx265_10bit: true,
         }
     }
 }
@@ -46,6 +49,61 @@ pub enum HdrConversion {
     TonemapToSdr {
         source: HdrFormat,
     },
+    /// Keep PQ (HDR10) or HLG: 10-bit HEVC with BT.2020 tags and the
+    /// source's mastering metadata. Dynamic metadata is dropped.
+    Preserve {
+        source: HdrFormat,
+    },
+}
+
+impl HdrConversion {
+    pub fn is_preserve(&self) -> bool {
+        matches!(self, HdrConversion::Preserve { .. })
+    }
+
+    pub fn is_tonemap(&self) -> bool {
+        matches!(self, HdrConversion::TonemapToSdr { .. })
+    }
+}
+
+/// Transfer function of an HDR signal that can be kept in a 10-bit encode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HdrTransfer {
+    Pq,
+    Hlg,
+}
+
+impl HdrTransfer {
+    /// `None` if the format has no HDR10/HLG picture to keep (SDR, Dolby
+    /// Vision without compatible base layer, unknown).
+    pub fn of(hdr: &HdrFormat) -> Option<HdrTransfer> {
+        match hdr {
+            HdrFormat::Hdr10 | HdrFormat::Hdr10Plus => Some(HdrTransfer::Pq),
+            HdrFormat::Hlg => Some(HdrTransfer::Hlg),
+            HdrFormat::DolbyVision(dv) if dv.profile != Some(5) => match dv.compatibility {
+                DvCompatibility::Hdr10 => Some(HdrTransfer::Pq),
+                DvCompatibility::Hlg => Some(HdrTransfer::Hlg),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Format the encode produces.
+    pub fn label(self) -> &'static str {
+        match self {
+            HdrTransfer::Pq => "HDR10",
+            HdrTransfer::Hlg => "HLG",
+        }
+    }
+
+    /// ffmpeg/x265 name of the transfer characteristic.
+    pub fn ffmpeg_name(self) -> &'static str {
+        match self {
+            HdrTransfer::Pq => "smpte2084",
+            HdrTransfer::Hlg => "arib-std-b67",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -57,6 +115,10 @@ pub enum VideoAction {
         resolution: TargetResolution,
         hdr: HdrConversion,
         deinterlace: bool,
+        /// 10-bit output (yuv420p10le) – CPU encodes only; required when HDR
+        /// is kept. Hardware encoders write 8 bit for SDR.
+        #[serde(default)]
+        ten_bit: bool,
     },
 }
 
@@ -269,8 +331,17 @@ pub enum PlanWarning {
     DolbyVisionMetadataDropped,
     Hdr10PlusMetadataDropped,
     HdrPreserveNotSupported,
-    /// HDR is kept only when the video stream is copied.
-    HdrPreserveNeedsCopy,
+    /// Keeping HDR was requested, but the format has no HDR10/HLG picture.
+    HdrFormatNotPreservable {
+        format: String,
+    },
+    /// libx265 without 10-bit support: HDR cannot be encoded.
+    HdrPreserveNo10Bit,
+    /// HDR10+/Dolby Vision encoded as their static base (dynamic metadata lost).
+    HdrKeptAsBase {
+        format: String,
+        base: String,
+    },
     BlackBarsCropped {
         from: Dimensions,
         to: Dimensions,
@@ -354,7 +425,18 @@ impl PlanWarning {
             PlanWarning::HdrPreserveNotSupported => {
                 tr!("Preserving HDR requires HEVC – converting to SDR").into()
             }
-            PlanWarning::HdrPreserveNeedsCopy => tr!("HDR can only be kept when the video stream is copied unchanged – re-encoding converts to SDR").into(),
+            PlanWarning::HdrFormatNotPreservable { format } => trf!(
+                "{} has no HDR10/HLG picture that can be kept – converting to SDR",
+                format
+            ),
+            PlanWarning::HdrPreserveNo10Bit => {
+                tr!("libx265 cannot encode 10 bit – HDR is converted to SDR").into()
+            }
+            PlanWarning::HdrKeptAsBase { format, base } => trf!(
+                "{} is kept as {}; dynamic metadata is dropped",
+                format,
+                base
+            ),
             PlanWarning::BlackBarsCropped { from, to } => {
                 trf!("Black bars removed: {} → {}", from, to)
             }
@@ -615,19 +697,22 @@ fn plan_video(
         reasons.push(VideoReason::Interlaced);
     }
 
-    // HDR is only kept by copying the stream: re-encoding writes 8-bit
-    // BT.709 and would silently drop it, so every encode tone maps.
+    // HDR: kept by copying the stream or by a 10-bit libx265 encode with
+    // colour tags and mastering metadata; otherwise tone mapped to SDR.
     let hdr_source = v.hdr.is_hdr();
-    let preserve_hdr = hdr_source
-        && profile.hdr.strategy == HdrStrategy::Preserve
-        && settings.codec == TargetVideoCodec::Hevc;
-    if hdr_source
-        && profile.hdr.strategy == HdrStrategy::Preserve
-        && settings.codec != TargetVideoCodec::Hevc
-    {
+    let wants_preserve = hdr_source && profile.hdr.strategy == HdrStrategy::Preserve;
+    if wants_preserve && settings.codec != TargetVideoCodec::Hevc {
         warnings.push(PlanWarning::HdrPreserveNotSupported);
     }
-    if hdr_source && !preserve_hdr {
+    let preservable = wants_preserve
+        && settings.codec == TargetVideoCodec::Hevc
+        && HdrTransfer::of(&v.hdr).is_some();
+    if wants_preserve && settings.codec == TargetVideoCodec::Hevc && !preservable {
+        warnings.push(PlanWarning::HdrFormatNotPreservable {
+            format: v.hdr.label(),
+        });
+    }
+    if hdr_source && !preservable {
         reasons.push(VideoReason::Hdr(v.hdr.label()));
     }
 
@@ -643,33 +728,51 @@ fn plan_video(
     if reasons.is_empty() && !settings.allow_copy {
         reasons.push(VideoReason::ProfileForcesEncode);
     }
-    if preserve_hdr && !reasons.is_empty() {
-        warnings.push(PlanWarning::HdrPreserveNeedsCopy);
-        reasons.push(VideoReason::Hdr(v.hdr.label()));
-    }
 
     let mut hdr = HdrConversion::None;
     if hdr_source && !reasons.is_empty() {
-        if !(caps.zscale && caps.tonemap) {
-            blockers.push(PlanBlocker::TonemapUnavailable);
+        let encode_hdr = preservable && caps.libx265 && caps.libx265_10bit;
+        if preservable && caps.libx265 && !caps.libx265_10bit {
+            warnings.push(PlanWarning::HdrPreserveNo10Bit);
+            reasons.push(VideoReason::Hdr(v.hdr.label()));
         }
-        match &v.hdr {
-            HdrFormat::DolbyVision(dv) => {
-                if dv.compatibility == DvCompatibility::None || dv.profile == Some(5) {
-                    blockers.push(PlanBlocker::DolbyVisionProfile5);
-                }
-                warnings.push(PlanWarning::DolbyVisionMetadataDropped);
+        if encode_hdr {
+            if let Some(base) = HdrTransfer::of(&v.hdr)
+                && matches!(v.hdr, HdrFormat::Hdr10Plus | HdrFormat::DolbyVision(_))
+            {
+                warnings.push(PlanWarning::HdrKeptAsBase {
+                    format: v.hdr.label(),
+                    base: base.label().into(),
+                });
             }
-            HdrFormat::Hdr10Plus => warnings.push(PlanWarning::Hdr10PlusMetadataDropped),
-            _ => {}
+            hdr = HdrConversion::Preserve {
+                source: v.hdr.clone(),
+            };
+        } else {
+            if !(caps.zscale && caps.tonemap) {
+                blockers.push(PlanBlocker::TonemapUnavailable);
+            }
+            match &v.hdr {
+                HdrFormat::DolbyVision(dv) => {
+                    if dv.compatibility == DvCompatibility::None || dv.profile == Some(5) {
+                        blockers.push(PlanBlocker::DolbyVisionProfile5);
+                    }
+                    warnings.push(PlanWarning::DolbyVisionMetadataDropped);
+                }
+                HdrFormat::Hdr10Plus => warnings.push(PlanWarning::Hdr10PlusMetadataDropped),
+                _ => {}
+            }
+            warnings.push(PlanWarning::HdrToneMapped {
+                format: v.hdr.label(),
+            });
+            hdr = HdrConversion::TonemapToSdr {
+                source: v.hdr.clone(),
+            };
         }
-        warnings.push(PlanWarning::HdrToneMapped {
-            format: v.hdr.label(),
-        });
-        hdr = HdrConversion::TonemapToSdr {
-            source: v.hdr.clone(),
-        };
     }
+    // 10 bit: always when HDR is kept, otherwise per profile (HEVC only).
+    let ten_bit = matches!(hdr, HdrConversion::Preserve { .. })
+        || (settings.codec == TargetVideoCodec::Hevc && settings.hevc_10bit && caps.libx265_10bit);
 
     if !caps.libx264 && settings.codec == TargetVideoCodec::H264 && !reasons.is_empty() {
         blockers.push(PlanBlocker::EncoderUnavailable("libx264".into()));
@@ -693,6 +796,7 @@ fn plan_video(
             resolution,
             hdr,
             deinterlace,
+            ten_bit,
         }
     };
     VideoPlan {

@@ -23,7 +23,7 @@ use crate::encoding::crop;
 use crate::encoding::hardware::HardwareCaps;
 use crate::encoding::plan::{self, EncodePlan, PlanWarning, VideoAction};
 use crate::encoding::process::{ProcessHandle, RunOptions, run_ffmpeg};
-use crate::encoding::profile::{EncodingProfile, QualityMetric, TargetVideoCodec};
+use crate::encoding::profile::{EncodingProfile, HdrStrategy, QualityMetric, TargetVideoCodec};
 use crate::encoding::quality::{self, AutoChoice, QualityContext, QualityResult};
 use crate::encoding::validate::{
     self, CheckKind, ValidateRequest, ValidationCheck, ValidationReport,
@@ -89,10 +89,20 @@ fn file_facts(media: &MediaFile) -> io::Result<FileFacts> {
     })
 }
 
-pub(super) fn resolve_setup(ctx: &RunnerContext, codec: TargetVideoCodec) -> EncoderSetup {
+/// Encoder setup for `plan`. Keeping HDR always uses libx265 on the CPU:
+/// only there are 10 bit, colour tags and mastering metadata guaranteed.
+pub(super) fn resolve_setup(
+    ctx: &RunnerContext,
+    plan: &EncodePlan,
+    codec: TargetVideoCodec,
+) -> EncoderSetup {
     let r = &ctx.resources;
+    let keeps_hdr = matches!(
+        plan.video.as_ref().map(|v| &v.action),
+        Some(VideoAction::Encode { hdr, .. }) if hdr.is_preserve()
+    );
     EncoderSetup {
-        hw_encode: if r.hw_encode_enabled {
+        hw_encode: if r.hw_encode_enabled && !keeps_hdr {
             ctx.caps.resolve_encoder(r.hw_encode, codec)
         } else {
             None
@@ -105,6 +115,7 @@ pub(super) fn resolve_setup(ctx: &RunnerContext, codec: TargetVideoCodec) -> Enc
         threads: r.cpu_threads,
         vaapi_device: r.vaapi_device.clone(),
         gpu_index: r.gpu_index,
+        x265_dolbyvision_opt: ctx.caps.libx265_dolbyvision,
     }
 }
 
@@ -236,6 +247,32 @@ where
     outcome
 }
 
+/// Reads mastering display / content light level of an HDR source into
+/// `media`. Without them HDR is still kept, only less precisely signalled.
+async fn read_hdr_metadata(ctx: &RunnerContext, media: &mut MediaFile, plan: &EncodePlan) {
+    let Some(vp) = plan.video.as_ref() else {
+        return;
+    };
+    let path = media.absolute_path.clone();
+    let Some(stream) = media
+        .video
+        .iter_mut()
+        .find(|v| v.type_index == vp.source_type_index && !v.attached_pic)
+    else {
+        return;
+    };
+    if !stream.hdr.is_hdr() || stream.hdr_metadata.is_some() {
+        return;
+    }
+    match probe::probe_hdr_metadata(&ctx.tools.ffprobe, &path, vp.source_type_index).await {
+        Ok(meta) => {
+            tracing::info!("HDR metadata: {meta:?}");
+            stream.hdr_metadata = Some(meta);
+        }
+        Err(e) => tracing::warn!("HDR metadata not readable: {e}"),
+    }
+}
+
 /// Detects black bars and stores them in `media`. Returns the new plan if
 /// the bars change it. Detection errors are logged and ignored (full frame).
 async fn detect_black_bars(
@@ -338,6 +375,12 @@ where
         .await
         .map_err(|e| Error::io(work_dir, e))?;
 
+    // Static HDR10 metadata for encodes that keep HDR (also needed when the
+    // automatic method switches to HEVC later).
+    if ctx.profile.hdr.strategy == HdrStrategy::Preserve && !plan.video_is_copied() {
+        read_hdr_metadata(ctx, &mut media, &plan).await;
+    }
+
     // Black bars: measured only for files that are actually re-encoded.
     if let Some(cropped) = detect_black_bars(ctx, &mut media, &plan, handle).await? {
         plan = cropped;
@@ -359,7 +402,7 @@ where
     };
     let mut profile = ctx.profile.clone();
     let mut codec = encode_codec(&plan, &profile);
-    let mut setup = resolve_setup(ctx, codec);
+    let mut setup = resolve_setup(ctx, &plan, codec);
     emit(RunnerEvent::Encoder {
         label: encoder_label(&setup, &plan, codec),
         fallback: false,
@@ -392,7 +435,7 @@ where
         search_result = Some(selection.quality);
         fallback = selection.fallback;
         codec = encode_codec(&plan, &profile);
-        setup = resolve_setup(ctx, codec);
+        setup = resolve_setup(ctx, &plan, codec);
         emit(RunnerEvent::Encoder {
             label: encoder_label(&setup, &plan, codec),
             fallback: false,
@@ -475,7 +518,7 @@ where
                 profile = fb.profile;
                 crf_override = Some(fb.crf);
                 codec = encode_codec(&plan, &profile);
-                setup = resolve_setup(ctx, codec);
+                setup = resolve_setup(ctx, &plan, codec);
                 emit(RunnerEvent::Replanned(Box::new(plan.clone())));
                 emit(RunnerEvent::Encoder {
                     label: encoder_label(&setup, &plan, codec),

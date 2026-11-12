@@ -1,5 +1,6 @@
 use super::*;
 use crate::analyzer::resolution::CropRect;
+use crate::encoding::plan::PlanWarning;
 use crate::encoding::plan::{PlanCapabilities, build_plan};
 use crate::media::fixtures::*;
 use crate::media::model::*;
@@ -336,23 +337,125 @@ fn encode_args(m: &MediaFile, plan: &EncodePlan, profile: &EncodingProfile) -> V
     }))
 }
 
+fn x265_params(args: &[String]) -> String {
+    value_after(args, "-x265-params").remove(0)
+}
+
 #[test]
-fn hdr_preserve_never_writes_hdr_as_8_bit() {
-    // UHD must be downscaled → re-encode → HDR cannot be kept.
-    let m = uhd_hdr();
+fn hdr10_is_kept_as_10_bit_with_mastering_metadata() {
+    // UHD must be downscaled → re-encode keeps HDR10.
+    let mut m = uhd_hdr();
+    m.video[0].hdr_metadata = Some(HdrMetadata {
+        mastering: Some(MasteringDisplay {
+            red: (34000, 16000),
+            green: (13250, 34500),
+            blue: (7500, 3000),
+            white_point: (15635, 16450),
+            max_luminance: 10_000_000,
+            min_luminance: 50,
+        }),
+        max_cll: Some((1000, 400)),
+    });
     let profile = hevc_preserve_profile();
     let plan = build_plan(&m, &profile, &PlanCapabilities::default());
-    let Some(VideoAction::Encode { hdr, .. }) = plan.video.as_ref().map(|v| &v.action) else {
+    let Some(VideoAction::Encode { hdr, ten_bit, .. }) = plan.video.as_ref().map(|v| &v.action)
+    else {
         panic!("expected encode");
     };
-    assert!(matches!(hdr, HdrConversion::TonemapToSdr { .. }));
+    assert!(hdr.is_preserve() && *ten_bit);
+    assert!(
+        !plan
+            .warnings
+            .iter()
+            .any(|w| matches!(w, PlanWarning::HdrToneMapped { .. }))
+    );
+
+    let args = encode_args(&m, &plan, &profile);
+    let vf = value_after(&args, "-vf").remove(0);
+    assert!(!vf.contains("tonemap") && !vf.contains("zscale"), "{vf}");
+    assert!(vf.ends_with("format=yuv420p10le"), "{vf}");
+    assert_eq!(value_after(&args, "-pix_fmt"), ["yuv420p10le"]);
+    assert_eq!(value_after(&args, "-color_primaries"), ["bt2020"]);
+    assert_eq!(value_after(&args, "-color_trc"), ["smpte2084"]);
+    assert_eq!(value_after(&args, "-colorspace"), ["bt2020nc"]);
+    let x265 = x265_params(&args);
+    for part in [
+        "colorprim=bt2020",
+        "transfer=smpte2084",
+        "colormatrix=bt2020nc",
+        "hdr10=1",
+        "master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,50)",
+        "max-cll=1000,400",
+    ] {
+        assert!(
+            x265.split(':').any(|p| p == part),
+            "{part} missing in {x265}"
+        );
+    }
+}
+
+#[test]
+fn hlg_and_dolby_vision_bases_are_kept() {
+    let profile = hevc_preserve_profile();
+    let mut m = uhd_hdr();
+    m.video[0].hdr = HdrFormat::Hlg;
+    let plan = build_plan(&m, &profile, &PlanCapabilities::default());
+    let x265 = x265_params(&encode_args(&m, &plan, &profile));
+    assert!(x265.contains("transfer=arib-std-b67") && !x265.contains("hdr10"));
+
+    // Dolby Vision 8.1: kept as its HDR10 base, with a note.
+    m.video[0].hdr = HdrFormat::DolbyVision(DolbyVisionInfo {
+        profile: Some(8),
+        compatibility: DvCompatibility::Hdr10,
+        ..DolbyVisionInfo::default()
+    });
+    let plan = build_plan(&m, &profile, &PlanCapabilities::default());
+    assert!(plan.warnings.contains(&PlanWarning::HdrKeptAsBase {
+        format: m.video[0].hdr.label(),
+        base: "HDR10".into(),
+    }));
+    let mut setup = EncoderSetup::cpu();
+    setup.x265_dolbyvision_opt = true;
+    let args = strings(&build_encode_args(&EncodeCommand {
+        media: &m,
+        plan: &plan,
+        profile: &profile,
+        setup: &setup,
+        output: Path::new("/work/1/out.mp4"),
+        crf: None,
+        window: None,
+    }));
+    assert_eq!(value_after(&args, "-dolbyvision"), ["0"]);
+
+    // Profile 5 has no base layer: not preservable → tone mapping (blocked).
+    m.video[0].hdr = HdrFormat::DolbyVision(DolbyVisionInfo {
+        profile: Some(5),
+        compatibility: DvCompatibility::None,
+        ..DolbyVisionInfo::default()
+    });
+    let plan = build_plan(&m, &profile, &PlanCapabilities::default());
     assert!(
         plan.warnings
-            .contains(&crate::encoding::plan::PlanWarning::HdrPreserveNeedsCopy)
+            .iter()
+            .any(|w| matches!(w, PlanWarning::HdrFormatNotPreservable { .. }))
     );
-    let args = encode_args(&m, &plan, &profile);
-    assert!(value_after(&args, "-vf")[0].contains("tonemap="));
-    assert_eq!(value_after(&args, "-color_trc"), ["bt709"]);
+}
+
+#[test]
+fn hdr_falls_back_to_sdr_without_10_bit_x265() {
+    let m = uhd_hdr();
+    let profile = hevc_preserve_profile();
+    let caps = PlanCapabilities {
+        libx265_10bit: false,
+        ..PlanCapabilities::default()
+    };
+    let plan = build_plan(&m, &profile, &caps);
+    let Some(VideoAction::Encode { hdr, ten_bit, .. }) = plan.video.as_ref().map(|v| &v.action)
+    else {
+        panic!("expected encode");
+    };
+    assert!(hdr.is_tonemap() && !*ten_bit);
+    assert!(plan.warnings.contains(&PlanWarning::HdrPreserveNo10Bit));
 }
 
 #[test]
@@ -366,11 +469,57 @@ fn hdr_preserve_copies_a_compatible_stream() {
     let profile = hevc_preserve_profile();
     let plan = build_plan(&m, &profile, &PlanCapabilities::default());
     assert!(plan.video_is_copied());
-    assert!(!plan.warnings.iter().any(|w| matches!(
-        w,
-        crate::encoding::plan::PlanWarning::HdrPreserveNeedsCopy
-            | crate::encoding::plan::PlanWarning::HdrToneMapped { .. }
-    )));
+    assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+}
+
+#[test]
+fn sdr_hevc_is_10_bit_on_the_cpu_only() {
+    let m = media(
+        "mkv",
+        20_000_000_000,
+        7200.0,
+        vec![video("mpeg2video", 1920, 1080)],
+        vec![],
+        vec![],
+    );
+    let mut profile = EncodingProfile::universal();
+    profile.video.codec = TargetVideoCodec::Hevc;
+    let plan = build_plan(&m, &profile, &PlanCapabilities::default());
+    let args = encode_args(&m, &plan, &profile);
+    assert_eq!(value_after(&args, "-pix_fmt"), ["yuv420p10le"]);
+    // SDR: no colour tags, no HDR parameters.
+    assert!(value_after(&args, "-color_trc").is_empty());
+    assert!(!x265_params(&args).contains("colorprim"));
+
+    // Hardware encoders stay at 8 bit.
+    let nvenc = EncoderSetup {
+        hw_encode: Some(HwBackend::Nvidia),
+        ..EncoderSetup::cpu()
+    };
+    let args = strings(&build_encode_args(&EncodeCommand {
+        media: &m,
+        plan: &plan,
+        profile: &profile,
+        setup: &nvenc,
+        output: Path::new("/work/1/out.mp4"),
+        crf: None,
+        window: None,
+    }));
+    assert_eq!(value_after(&args, "-pix_fmt"), ["yuv420p"]);
+
+    // Profile switch off → 8 bit; H.264 never 10 bit.
+    profile.video.hevc_10bit = false;
+    let plan = build_plan(&m, &profile, &PlanCapabilities::default());
+    assert_eq!(
+        value_after(&encode_args(&m, &plan, &profile), "-pix_fmt"),
+        ["yuv420p"]
+    );
+    let h264 = EncodingProfile::universal();
+    let plan = build_plan(&m, &h264, &PlanCapabilities::default());
+    assert_eq!(
+        value_after(&encode_args(&m, &plan, &h264), "-pix_fmt"),
+        ["yuv420p"]
+    );
 }
 
 fn letterboxed(width: u32, height: u32, crop: CropRect) -> MediaFile {

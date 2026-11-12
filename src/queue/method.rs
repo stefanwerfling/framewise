@@ -9,6 +9,9 @@
 //! 4. If even the best encode saves too little, the video stream is copied
 //!    (when the source stream can be copied at all).
 //!
+//! HDR source with "Preserve HDR" and HEVC allowed: H.264 cannot keep HDR,
+//! so HEVC is the only candidate (step 2 searches HEVC, step 3 is skipped).
+//!
 //! The quality floor always wins over file size.
 
 use std::path::{Path, PathBuf};
@@ -20,7 +23,7 @@ use crate::core::error::{Error, Result};
 use crate::encoding::command::Window;
 use crate::encoding::plan::{self, EncodePlan, VideoAction};
 use crate::encoding::process::ProcessHandle;
-use crate::encoding::profile::{EncodingProfile, TargetVideoCodec};
+use crate::encoding::profile::{EncodingProfile, HdrStrategy, TargetVideoCodec};
 use crate::encoding::quality::{
     AutoChoice, AutoDecision, MethodCandidate, QualityContext, QualityResult, sample_windows,
     snap_to_frame_gap,
@@ -113,7 +116,7 @@ where
                 Some(VideoAction::Encode { codec, .. }) => *codec,
                 _ => profile.video.codec,
             };
-            let setup = resolve_setup(ctx, codec);
+            let setup = resolve_setup(ctx, &plan, codec);
             let qctx = QualityContext {
                 ffmpeg: &ctx.tools.ffmpeg,
                 media: input.media,
@@ -144,8 +147,45 @@ where
         }
     };
 
-    // 2. Profile codec (H.264 by default).
-    let a = run(profile.clone(), input.plan.clone()).await?;
+    // HEVC variant of the profile, starting `+2` above an H.264 CRF.
+    let hevc_profile = |h264_crf: u8| {
+        let mut hevc = profile.clone();
+        hevc.video.codec = TargetVideoCodec::Hevc;
+        hevc.video.preset = q.hevc_preset.clone();
+        hevc.video.allow_copy = false;
+        // x265 reaches a given quality at a higher CRF than x264.
+        hevc.video.crf = h264_crf.saturating_add(2);
+        hevc.quality.crf_max = q.crf_max.saturating_add(4);
+        hevc
+    };
+
+    // HDR to keep, but the profile codec cannot: search HEVC only.
+    let keep_hdr = if q.compare_hevc
+        && profile.video.codec == TargetVideoCodec::H264
+        && profile.hdr.strategy == HdrStrategy::Preserve
+    {
+        let hevc = hevc_profile(profile.video.crf);
+        let hevc_plan = plan::build_plan(input.media, &hevc, &ctx.caps.plan_capabilities());
+        let keeps = matches!(
+            hevc_plan.video.as_ref().map(|v| &v.action),
+            Some(VideoAction::Encode { hdr, .. }) if hdr.is_preserve()
+        );
+        (keeps && !hevc_plan.is_blocked()).then_some((hevc, hevc_plan))
+    } else {
+        None
+    };
+    let keeping_hdr = keep_hdr.is_some();
+
+    // 2. Profile codec (H.264 by default), or HEVC when HDR is kept.
+    let a = match keep_hdr {
+        Some((hevc, hevc_plan)) => {
+            notes.push(trf!(
+                "HDR is kept: only HEVC searched (H.264 cannot keep HDR)"
+            ));
+            run(hevc, hevc_plan).await?
+        }
+        None => run(profile.clone(), input.plan.clone()).await?,
+    };
     let effective_windows = windows.clone().unwrap_or_else(|| {
         sample_windows(duration, q.sample_count, q.sample_seconds)
             .into_iter()
@@ -159,13 +199,7 @@ where
     let mut b: Option<Candidate> = None;
     if q.compare_hevc && a.codec == TargetVideoCodec::H264 {
         let remaining = budget.saturating_sub(started.elapsed());
-        let mut hevc = profile.clone();
-        hevc.video.codec = TargetVideoCodec::Hevc;
-        hevc.video.preset = q.hevc_preset.clone();
-        hevc.video.allow_copy = false;
-        // x265 reaches a given quality at a higher CRF than x264.
-        hevc.video.crf = a.result.crf.saturating_add(2);
-        hevc.quality.crf_max = q.crf_max.saturating_add(4);
+        let hevc = hevc_profile(a.result.crf);
         let hevc_plan = plan::build_plan(input.media, &hevc, &ctx.caps.plan_capabilities());
         if !ctx.caps.plan_capabilities().libx265 {
             notes.push(trf!("HEVC not compared: libx265 is not available"));
@@ -240,7 +274,12 @@ where
         && let Some(r) = chosen_ratio
         && r > 1.0 - q.min_saving
     {
-        let mut copy = profile.clone();
+        // When HDR is kept, the copy must keep it too (HEVC target).
+        let mut copy = if keeping_hdr {
+            chosen.profile.clone()
+        } else {
+            profile.clone()
+        };
         copy.video.allow_copy = true;
         copy.video.copy_max_bpp = f64::MAX;
         let copy_plan = plan::build_plan(input.media, &copy, &ctx.caps.plan_capabilities());

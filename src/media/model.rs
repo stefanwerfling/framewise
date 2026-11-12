@@ -122,6 +122,42 @@ impl VideoCodec {
     }
 }
 
+/// Mastering display colour volume (SMPTE ST 2086) in x265 units:
+/// chromaticity in 0.00002, luminance in 0.0001 cd/m².
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MasteringDisplay {
+    pub red: (u32, u32),
+    pub green: (u32, u32),
+    pub blue: (u32, u32),
+    pub white_point: (u32, u32),
+    pub max_luminance: u32,
+    pub min_luminance: u32,
+}
+
+impl MasteringDisplay {
+    /// `G(x,y)B(x,y)R(x,y)WP(x,y)L(max,min)` as x265's `master-display`.
+    pub fn x265(&self) -> String {
+        let p = |(x, y): (u32, u32)| format!("({x},{y})");
+        format!(
+            "G{}B{}R{}WP{}L({},{})",
+            p(self.green),
+            p(self.blue),
+            p(self.red),
+            p(self.white_point),
+            self.max_luminance,
+            self.min_luminance
+        )
+    }
+}
+
+/// Static HDR10 metadata of a stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HdrMetadata {
+    pub mastering: Option<MasteringDisplay>,
+    /// Maximum content / frame-average light level in cd/m² (CTA-861.3).
+    pub max_cll: Option<(u32, u32)>,
+}
+
 /// Dynamic range of a video stream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum HdrFormat {
@@ -222,6 +258,10 @@ pub struct VideoStream {
     /// before encoding (see `encoding::crop`).
     #[serde(default)]
     pub crop: Option<CropRect>,
+    /// Static HDR10 metadata. Not part of the scan: read right before an
+    /// encode that keeps HDR (`None` = not read).
+    #[serde(default)]
+    pub hdr_metadata: Option<HdrMetadata>,
 }
 
 impl VideoStream {

@@ -63,6 +63,9 @@ pub struct VideoSettings {
     pub deinterlace: bool,
     /// Detect black bars before encoding and cut them off.
     pub auto_crop: bool,
+    /// HEVC on the CPU in 10 bit (Main 10): less banding in gradients and
+    /// dark scenes. Hardware encoders stay at 8 bit for SDR.
+    pub hevc_10bit: bool,
     /// Optional x264 tune (film, animation, grain …).
     pub tune: Option<String>,
 }
@@ -81,6 +84,7 @@ impl Default for VideoSettings {
             copy_max_bpp: 0.18,
             deinterlace: true,
             auto_crop: true,
+            hevc_10bit: true,
             tune: None,
         }
     }
@@ -213,8 +217,8 @@ impl Default for SubtitleSettings {
 pub enum HdrStrategy {
     /// Convert to SDR BT.709 with tone mapping.
     TonemapToSdr,
-    /// Keep HDR. Only possible by copying the video stream (HEVC target);
-    /// a re-encode tone maps. HDR encoding is planned for a later version.
+    /// Keep HDR10/HLG (HEVC target): copied, or encoded with libx265 in
+    /// 10 bit with colour tags and mastering metadata.
     Preserve,
 }
 
@@ -222,7 +226,7 @@ impl HdrStrategy {
     pub fn label(self) -> &'static str {
         match self {
             HdrStrategy::TonemapToSdr => tr!("Tone map to SDR"),
-            HdrStrategy::Preserve => tr!("Preserve HDR (HEVC, copy only)"),
+            HdrStrategy::Preserve => tr!("Preserve HDR (HEVC 10 bit)"),
         }
     }
 }

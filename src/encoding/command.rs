@@ -13,13 +13,17 @@
 //!   incomplete colour tags.
 //! * H.264 level is raised to 4.2 for >30 fps at 1080p (level 4.1 would be
 //!   signalled incorrectly).
+//! * 10 bit (`yuv420p10le`) only on the CPU (libx265). Keeping HDR adds
+//!   BT.2020 tags and the source's mastering metadata to the bitstream (x265
+//!   SEI) and the container. libx265's `-dolbyvision` (ffmpeg ≥ 7, "auto")
+//!   is switched off: the output never claims Dolby Vision.
 
 use std::ffi::OsString;
 use std::path::Path;
 
 use super::plan::{
-    AudioAction, EncodePlan, HdrConversion, SidecarFormat, SubtitleAction, SubtitleOutput,
-    VideoAction,
+    AudioAction, EncodePlan, HdrConversion, HdrTransfer, SidecarFormat, SubtitleAction,
+    SubtitleOutput, VideoAction,
 };
 use super::profile::{EncodingProfile, TargetVideoCodec};
 use crate::analyzer::resolution::{Dimensions, ResizeOp, TargetResolution};
@@ -37,6 +41,8 @@ pub struct EncoderSetup {
     pub threads: usize,
     pub vaapi_device: String,
     pub gpu_index: u32,
+    /// libx265 has `-dolbyvision` (switched off explicitly).
+    pub x265_dolbyvision_opt: bool,
 }
 
 impl EncoderSetup {
@@ -47,7 +53,16 @@ impl EncoderSetup {
             threads: 0,
             vaapi_device: "/dev/dri/renderD128".into(),
             gpu_index: 0,
+            x265_dolbyvision_opt: false,
         }
+    }
+
+    /// Software encoder (libx264/libx265).
+    pub fn is_cpu(&self) -> bool {
+        matches!(
+            self.hw_encode,
+            None | Some(HwBackend::Cpu) | Some(HwBackend::Auto)
+        )
     }
 
     pub fn encoder_label(&self, codec: TargetVideoCodec) -> String {
@@ -109,13 +124,29 @@ fn h264_level(dims: Dimensions, fps: f64, configured: &str) -> String {
     }
 }
 
+/// Output pixel format of a software encode.
+pub fn pix_fmt(ten_bit: bool) -> &'static str {
+    if ten_bit { "yuv420p10le" } else { "yuv420p" }
+}
+
+/// Whether the video of `plan` is encoded in 10 bit with `setup`.
+pub fn encodes_10bit(plan: &EncodePlan, setup: &EncoderSetup) -> bool {
+    setup.is_cpu()
+        && matches!(
+            plan.video.as_ref().map(|v| &v.action),
+            Some(VideoAction::Encode { ten_bit: true, .. })
+        )
+}
+
 /// Build the `-vf` chain (CPU filters; hardware upload appended if needed).
+/// `ten_bit` is the effective output depth (see [`encodes_10bit`]).
 pub fn video_filters(
     resolution: &TargetResolution,
     hdr: &HdrConversion,
     deinterlace: bool,
     profile: &EncodingProfile,
     hw_encode: Option<HwBackend>,
+    ten_bit: bool,
 ) -> Option<String> {
     let mut chain: Vec<String> = Vec::new();
     if deinterlace {
@@ -163,9 +194,70 @@ pub fn video_filters(
             chain.push("hwupload".into());
         }
         Some(HwBackend::IntelQsv) => chain.push("format=nv12".into()),
-        _ => chain.push("format=yuv420p".into()),
+        _ => chain.push(format!("format={}", pix_fmt(ten_bit))),
     }
     Some(chain.join(","))
+}
+
+/// HDR signalling of an encode that keeps HDR.
+#[derive(Debug, Clone, PartialEq)]
+struct HdrOutput {
+    transfer: HdrTransfer,
+    /// x265 `master-display` string.
+    mastering: Option<String>,
+    max_cll: Option<(u32, u32)>,
+}
+
+impl HdrOutput {
+    fn new(hdr: &HdrConversion, media: &MediaFile) -> Option<Self> {
+        let HdrConversion::Preserve { source } = hdr else {
+            return None;
+        };
+        let meta = media.primary_video().and_then(|v| v.hdr_metadata);
+        let transfer = HdrTransfer::of(source)?;
+        let pq = transfer == HdrTransfer::Pq;
+        Some(Self {
+            transfer,
+            mastering: meta
+                .and_then(|m| m.mastering)
+                .filter(|_| pq)
+                .map(|m| m.x265()),
+            max_cll: meta.and_then(|m| m.max_cll).filter(|_| pq),
+        })
+    }
+
+    fn x265_params(&self) -> String {
+        let mut p = format!(
+            "colorprim=bt2020:transfer={}:colormatrix=bt2020nc:range=limited",
+            self.transfer.ffmpeg_name()
+        );
+        if self.transfer == HdrTransfer::Pq {
+            p.push_str(":hdr10=1:hdr10-opt=1");
+            if let Some(m) = &self.mastering {
+                p.push_str(&format!(":master-display={m}"));
+            }
+            if let Some((max, avg)) = self.max_cll {
+                p.push_str(&format!(":max-cll={max},{avg}"));
+            }
+        }
+        p
+    }
+}
+
+/// Container/stream colour tags matching the encoded picture.
+fn color_tags(args: &mut Args, hdr: &HdrConversion) {
+    let (primaries, transfer, space) = match hdr {
+        HdrConversion::None => return,
+        HdrConversion::TonemapToSdr { .. } => ("bt709", "bt709", "bt709"),
+        HdrConversion::Preserve { source } => match HdrTransfer::of(source) {
+            Some(t) => ("bt2020", t.ffmpeg_name(), "bt2020nc"),
+            None => return,
+        },
+    };
+    args.pair("-color_primaries", primaries)
+        .pair("-color_trc", transfer)
+        .pair("-colorspace", space)
+        .pair("-color_range", "tv");
 }
 
 /// Per-run video encoder parameters.
@@ -178,6 +270,9 @@ struct VideoEncode<'a> {
     setup: &'a EncoderSetup,
     /// Used for encoders without a constant-quality mode.
     estimated_bitrate: u64,
+    /// Effective 10-bit output (CPU only).
+    ten_bit: bool,
+    hdr: Option<HdrOutput>,
 }
 
 fn video_encoder_args(args: &mut Args, p: &VideoEncode<'_>) {
@@ -189,6 +284,8 @@ fn video_encoder_args(args: &mut Args, p: &VideoEncode<'_>) {
         profile,
         setup,
         estimated_bitrate,
+        ten_bit,
+        ref hdr,
     } = *p;
     let v = &profile.video;
     let backend = setup.hw_encode.unwrap_or(HwBackend::Cpu);
@@ -249,12 +346,19 @@ fn video_encoder_args(args: &mut Args, p: &VideoEncode<'_>) {
                 if setup.threads > 0 {
                     params.push_str(&format!(":pools={}", setup.threads));
                 }
+                if let Some(hdr) = hdr {
+                    params.push(':');
+                    params.push_str(&hdr.x265_params());
+                }
                 args.pair("-x265-params", params);
+                if setup.x265_dolbyvision_opt {
+                    args.pair("-dolbyvision", "0");
+                }
             }
         }
     }
     if !matches!(backend, HwBackend::Vaapi | HwBackend::IntelQsv) {
-        args.pair("-pix_fmt", "yuv420p");
+        args.pair("-pix_fmt", pix_fmt(ten_bit));
     }
 }
 
@@ -322,45 +426,26 @@ pub fn build_encode_args(cmd: &EncodeCommand<'_>) -> Vec<OsString> {
                 }
             }
             VideoAction::Encode {
-                codec,
-                crf,
                 resolution,
                 hdr,
                 deinterlace,
+                ..
             } => {
+                let ten_bit = encodes_10bit(cmd.plan, cmd.setup);
                 if let Some(filters) = video_filters(
                     resolution,
                     hdr,
                     *deinterlace,
                     cmd.profile,
                     cmd.setup.hw_encode,
+                    ten_bit,
                 ) {
                     args.pair("-vf", filters);
                 }
-                let fps = cmd
-                    .media
-                    .primary_video()
-                    .and_then(|pv| pv.fps())
-                    .unwrap_or(25.0);
-                let est = super::plan::estimate_video_bitrate(resolution.output, fps, *crf, *codec);
-                video_encoder_args(
-                    &mut args,
-                    &VideoEncode {
-                        codec: *codec,
-                        crf: cmd.crf.unwrap_or(*crf),
-                        out: resolution.output,
-                        fps,
-                        profile: cmd.profile,
-                        setup: cmd.setup,
-                        estimated_bitrate: est,
-                    },
-                );
-                if matches!(hdr, HdrConversion::TonemapToSdr { .. }) {
-                    args.pair("-color_primaries", "bt709")
-                        .pair("-color_trc", "bt709")
-                        .pair("-colorspace", "bt709")
-                        .pair("-color_range", "tv");
+                if let Some(enc) = video_encode(cmd) {
+                    video_encoder_args(&mut args, &enc);
                 }
+                color_tags(&mut args, hdr);
             }
         }
         args.pair("-disposition:v:0", "default");
@@ -447,18 +532,14 @@ pub fn build_encode_args(cmd: &EncodeCommand<'_>) -> Vec<OsString> {
 }
 
 /// Extract one subtitle stream to a sidecar file (stream copy, or text → SRT).
-/// Video encode parameters of a plan, if it re-encodes on the CPU – the only
-/// case where a pre-filtered reference yields exactly the encoder input
-/// (hardware paths add upload/format filters of their own).
-fn cpu_video_encode<'a>(cmd: &EncodeCommand<'a>) -> Option<VideoEncode<'a>> {
-    if !matches!(cmd.setup.hw_encode, None | Some(HwBackend::Cpu)) {
-        return None;
-    }
+/// Video encode parameters of a plan (`None` for a stream copy).
+fn video_encode<'a>(cmd: &EncodeCommand<'a>) -> Option<VideoEncode<'a>> {
     let v = cmd.plan.video.as_ref()?;
     let VideoAction::Encode {
         codec,
         crf,
         resolution,
+        hdr,
         ..
     } = &v.action
     else {
@@ -482,7 +563,19 @@ fn cpu_video_encode<'a>(cmd: &EncodeCommand<'a>) -> Option<VideoEncode<'a>> {
             *crf,
             *codec,
         ),
+        ten_bit: encodes_10bit(cmd.plan, cmd.setup),
+        hdr: HdrOutput::new(hdr, cmd.media),
     })
+}
+
+/// Video encode parameters of a plan, if it re-encodes on the CPU – the only
+/// case where a pre-filtered reference yields exactly the encoder input
+/// (hardware paths add upload/format filters of their own).
+fn cpu_video_encode<'a>(cmd: &EncodeCommand<'a>) -> Option<VideoEncode<'a>> {
+    if !matches!(cmd.setup.hw_encode, None | Some(HwBackend::Cpu)) {
+        return None;
+    }
+    video_encode(cmd)
 }
 
 /// Lossless (FFV1) copy of one source window after the plan's video filters
@@ -518,7 +611,9 @@ pub fn build_reference_args(
     }
     args.arg("-i").arg(cmd.media.absolute_path.as_os_str());
     args.pair("-map", format!("0:v:{}", v.source_type_index));
-    if let Some(filters) = video_filters(resolution, hdr, *deinterlace, cmd.profile, None) {
+    let ten_bit = encodes_10bit(cmd.plan, cmd.setup);
+    if let Some(filters) = video_filters(resolution, hdr, *deinterlace, cmd.profile, None, ten_bit)
+    {
         args.pair("-vf", filters);
     }
     args.pair("-c:v", "ffv1")
@@ -540,13 +635,10 @@ pub fn build_reference_sample_args(
     reference: &Path,
 ) -> Option<Vec<OsString>> {
     let enc = cpu_video_encode(cmd)?;
-    let tonemapped = matches!(
-        cmd.plan.video.as_ref().map(|v| &v.action),
-        Some(VideoAction::Encode {
-            hdr: HdrConversion::TonemapToSdr { .. },
-            ..
-        })
-    );
+    let hdr = match cmd.plan.video.as_ref().map(|v| &v.action) {
+        Some(VideoAction::Encode { hdr, .. }) => hdr.clone(),
+        _ => HdrConversion::None,
+    };
     let mut args = Args::new();
     base_args(&mut args);
     if cmd.setup.threads > 0 {
@@ -555,12 +647,7 @@ pub fn build_reference_sample_args(
     args.arg("-i").arg(reference.as_os_str());
     args.pair("-map", "0:v:0");
     video_encoder_args(&mut args, &enc);
-    if tonemapped {
-        args.pair("-color_primaries", "bt709")
-            .pair("-color_trc", "bt709")
-            .pair("-colorspace", "bt709")
-            .pair("-color_range", "tv");
-    }
+    color_tags(&mut args, &hdr);
     args.arg("-an").arg("-sn").arg("-dn");
     args.pair("-f", "matroska").arg(cmd.output.as_os_str());
     Some(args.into_vec())

@@ -9,8 +9,8 @@ use serde_json::Value;
 
 use super::classify::{self, HdrSignals};
 use super::model::{
-    AudioStream, ColorInfo, ContainerInfo, DolbyVisionInfo, MediaFile, Ratio, SubtitleStream,
-    VideoStream,
+    AudioStream, ColorInfo, ContainerInfo, DolbyVisionInfo, HdrMetadata, MasteringDisplay,
+    MediaFile, Ratio, SubtitleStream, VideoStream,
 };
 use crate::core::error::{Error, Result};
 use crate::core::tools::run_capture;
@@ -339,6 +339,7 @@ fn map_video(
         default: s.flag("default"),
         attached_pic: s.flag("attached_pic"),
         crop: None,
+        hdr_metadata: None,
     }
 }
 
@@ -428,6 +429,111 @@ pub async fn probe_hdr10_plus(ffprobe: &Path, file: &Path) -> Result<bool> {
 pub fn frames_have_hdr10_plus(json: &[u8]) -> bool {
     let text = String::from_utf8_lossy(json);
     text.contains("SMPTE2094-40") || text.contains("HDR10+")
+}
+
+/// Value of a side data field: `"34000/50000"`, `"0.68"` or a JSON number.
+fn side_value(v: &Value, key: &str) -> Option<f64> {
+    let field = v.get(key)?;
+    let value = match field {
+        Value::Number(n) => n.as_f64()?,
+        Value::String(s) => match s.split_once('/') {
+            Some((n, d)) => {
+                let (n, d) = (n.trim().parse::<f64>().ok()?, d.trim().parse::<f64>().ok()?);
+                if d == 0.0 {
+                    return None;
+                }
+                n / d
+            }
+            None => s.trim().parse().ok()?,
+        },
+        _ => return None,
+    };
+    (value.is_finite() && value >= 0.0).then_some(value)
+}
+
+fn mastering_display(d: &Value) -> Option<MasteringDisplay> {
+    let chroma = |k: &str| side_value(d, k).map(|v| (v * 50_000.0).round() as u32);
+    let pair = |x: &str, y: &str| Some((chroma(x)?, chroma(y)?));
+    let lum = |k: &str| side_value(d, k).map(|v| (v * 10_000.0).round() as u32);
+    let m = MasteringDisplay {
+        red: pair("red_x", "red_y")?,
+        green: pair("green_x", "green_y")?,
+        blue: pair("blue_x", "blue_y")?,
+        white_point: pair("white_point_x", "white_point_y")?,
+        max_luminance: lum("max_luminance")?,
+        min_luminance: lum("min_luminance")?,
+    };
+    (m.max_luminance > m.min_luminance).then_some(m)
+}
+
+fn content_light(d: &Value) -> Option<(u32, u32)> {
+    let v = |k: &str| side_value(d, k).map(|v| v.round() as u32);
+    let (max_content, max_average) = (v("max_content")?, v("max_average")?);
+    (max_content > 0).then_some((max_content, max_average))
+}
+
+/// Static HDR10 metadata from ffprobe JSON with streams and frames:
+/// container (stream side data) first, then the first frames (in-band SEI).
+pub fn parse_hdr_metadata(json: &[u8]) -> HdrMetadata {
+    let Ok(root) = serde_json::from_slice::<Value>(json) else {
+        return HdrMetadata::default();
+    };
+    let side_data = |section: &str| -> Vec<Value> {
+        root.get(section)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|s| s.get("side_data_list").and_then(Value::as_array))
+            .flatten()
+            .cloned()
+            .collect()
+    };
+    let all: Vec<Value> = side_data("streams")
+        .into_iter()
+        .chain(side_data("frames"))
+        .collect();
+    let of_type = |d: &Value, t: &str| {
+        d.get("side_data_type")
+            .and_then(Value::as_str)
+            .is_some_and(|s| s.contains(t))
+    };
+    HdrMetadata {
+        mastering: all
+            .iter()
+            .filter(|d| of_type(d, "Mastering display"))
+            .find_map(mastering_display),
+        max_cll: all
+            .iter()
+            .filter(|d| of_type(d, "Content light level"))
+            .find_map(content_light),
+    }
+}
+
+/// Reads the static HDR10 metadata of video stream `v:<type_index>`.
+pub async fn probe_hdr_metadata(
+    ffprobe: &Path,
+    file: &Path,
+    type_index: u32,
+) -> Result<HdrMetadata> {
+    let stream = format!("v:{type_index}");
+    let args: Vec<&std::ffi::OsStr> = vec![
+        "-v".as_ref(),
+        "error".as_ref(),
+        "-select_streams".as_ref(),
+        stream.as_ref(),
+        "-read_intervals".as_ref(),
+        "%+#5".as_ref(),
+        "-show_streams".as_ref(),
+        "-show_frames".as_ref(),
+        "-show_entries".as_ref(),
+        "stream=side_data_list:frame=side_data_list".as_ref(),
+        "-print_format".as_ref(),
+        "json".as_ref(),
+        "-i".as_ref(),
+        file.as_os_str(),
+    ];
+    let out = run_capture("ffprobe", ffprobe, args, PROBE_TIMEOUT, "HDR metadata").await?;
+    Ok(parse_hdr_metadata(&out.stdout))
 }
 
 fn is_unknown(v: Option<&str>) -> bool {
@@ -693,5 +799,47 @@ mod tests {
         assert_eq!(Ratio::parse("16:9"), Ratio::new(16, 9));
         assert_eq!(Ratio::parse("0/0"), None);
         assert_eq!(Ratio::parse("N/A"), None);
+    }
+
+    #[test]
+    fn hdr_metadata_from_frame_side_data() {
+        // ffprobe 8.1 output: SEI entries first, values as rationals/ints.
+        let json = br#"{"frames":[{"side_data_list":[
+            {"side_data_type":"H.26[45] User Data Unregistered SEI message"},
+            {"side_data_type":"Mastering display metadata","red_x":"34000/50000","red_y":"16000/50000",
+             "green_x":"13250/50000","green_y":"34500/50000","blue_x":"7500/50000","blue_y":"3000/50000",
+             "white_point_x":"15635/50000","white_point_y":"16450/50000",
+             "min_luminance":"50/10000","max_luminance":"10000000/10000"},
+            {"side_data_type":"Content light level metadata","max_content":1000,"max_average":400}]}],
+            "streams":[{}]}"#;
+        let m = parse_hdr_metadata(json);
+        assert_eq!(
+            m.mastering.unwrap().x265(),
+            "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,50)"
+        );
+        assert_eq!(m.max_cll, Some((1000, 400)));
+    }
+
+    #[test]
+    fn hdr_metadata_prefers_container_and_tolerates_gaps() {
+        // Container values (other max luminance) win over the frames.
+        let json = br#"{"streams":[{"side_data_list":[
+            {"side_data_type":"Mastering display metadata","red_x":"0.68","red_y":"0.32",
+             "green_x":"0.265","green_y":"0.69","blue_x":"0.15","blue_y":"0.06",
+             "white_point_x":"0.3127","white_point_y":"0.329",
+             "min_luminance":"0.0001","max_luminance":"4000"}]}],
+            "frames":[{"side_data_list":[
+            {"side_data_type":"Mastering display metadata","red_x":"34000/50000","red_y":"16000/50000",
+             "green_x":"13250/50000","green_y":"34500/50000","blue_x":"7500/50000","blue_y":"3000/50000",
+             "white_point_x":"15635/50000","white_point_y":"16450/50000",
+             "min_luminance":"50/10000","max_luminance":"10000000/10000"},
+            {"side_data_type":"Content light level metadata","max_content":0,"max_average":0}]}]}"#;
+        let m = parse_hdr_metadata(json);
+        let md = m.mastering.unwrap();
+        assert_eq!((md.max_luminance, md.min_luminance), (40_000_000, 1));
+        assert_eq!(md.white_point, (15635, 16450));
+        // MaxCLL 0 means "unknown".
+        assert_eq!(m.max_cll, None);
+        assert_eq!(parse_hdr_metadata(b"not json"), HdrMetadata::default());
     }
 }
