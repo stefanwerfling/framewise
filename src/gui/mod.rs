@@ -194,7 +194,10 @@ impl FramewiseApp {
                     cancelled,
                 } => {
                     self.snap.scan_progress = None;
-                    let text = if cancelled {
+                    let failed = cancelled && !issues.is_empty();
+                    let text = if failed {
+                        crate::trf!("Scan failed: {}", issues[0].message)
+                    } else if cancelled {
                         tr!("Scan cancelled").to_string()
                     } else {
                         crate::trf!(
@@ -205,7 +208,9 @@ impl FramewiseApp {
                         )
                     };
                     self.notify(
-                        if issues.is_empty() {
+                        if failed {
+                            NoticeLevel::Error
+                        } else if issues.is_empty() {
                             NoticeLevel::Info
                         } else {
                             NoticeLevel::Warning
@@ -255,6 +260,7 @@ impl FramewiseApp {
                     });
                 }
                 AppEvent::Notice { level, text } => self.notify(level, text),
+                AppEvent::Jellyfin(result) => self.settings_ui.on_jellyfin(result),
             }
         }
     }

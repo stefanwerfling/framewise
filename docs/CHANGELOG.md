@@ -379,3 +379,31 @@ statt fest im Profil zu stehen.
 - Neue Tests: Fehler bzw. „Absturz“ an jedem einzelnen Dateisystem-Schritt endet immer
   vollständig oder unberührt, Ersetzen behält alte Dateien bis zum Commit, Recovery,
   Aufräumen schont Arbeitsverzeichnisse mit offenem Journal.
+
+### Phase 13 – Jellyfin als Quelle
+- **Neue Quelle „Jellyfin“** neben dem lokalen Verzeichnis (Einstellungen → Quelle). framewise
+  liest Filme und Episoden über die API und bewertet sie gegen das aktive Profil – ohne
+  Zugriff auf die Dateien, daher nur als Bericht.
+  - Verbindungstest zeigt Servername und Version; Bibliotheken sind einzeln wählbar
+    (Standard: alle Film- und Serienbibliotheken).
+  - Seitenweises Lesen mit Fortschritt und Abbruch; Server vor 10.9 werden über den
+    Admin-Benutzer gelesen.
+  - Stream-Infos von Jellyfin laufen durch dieselbe Klassifikation wie ffprobe-Ergebnisse
+    (Dolby Vision mit Profil und Basisschicht, HDR10+, HLG, Atmos/DTS:X über das Profil).
+  - Mehrere Versionen eines Films werden einzeln bewertet; fehlende Episoden übersprungen;
+    noch nicht analysierte Dateien erscheinen unter „Prüfen“.
+  - Klare Fehlermeldungen für falsche Adresse, abgelehnten Schlüssel (401/403),
+    Zeitüberschreitung und TLS-Probleme.
+- **Bibliothek:** Titel statt Dateiname bei Server-Einträgen, aufklappbare Übersicht
+  „Filme / Serie → Staffel“ mit Anzahl zu bearbeitender Einträge; „In der Tabelle zeigen“
+  filtert auf eine Serie. Die Warteschlangen-Knöpfe entfallen für Server-Einträge.
+- **CSV-Export** der angezeigten Zeilen (auch für lokale Quellen): `;`-getrennt mit BOM,
+  mit Serie/Staffel/Episode, Server-Pfad, Empfehlung und Gründen (z. B. „Codec … ist nicht
+  das Zielformat“, „Audio ger DTS-HD MA → AAC“, „Container MKV → MP4“).
+- Die Konfigurationsdatei wird nur für den Benutzer lesbar geschrieben (`0600`), da sie den
+  API-Schlüssel enthält.
+- Neue Abhängigkeit `reqwest` (rustls, System-Zertifikate).
+- Neue Tests: Abbildung realistischer Jellyfin-Antworten (DV P8/P5, HLG ohne Transfer,
+  Atmos, PGS, externe und erzwungene Untertitel, `null`-Felder, Versionen, virtuelle
+  Episoden), Bewertung gegen das Profil, HTTP-Stub für Seitenabruf, Bibliotheksauswahl,
+  ältere Server, 401, nicht erreichbarer Server und Abbruch, Serienübersicht, CSV.

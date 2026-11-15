@@ -20,6 +20,7 @@ rusqlite = { version = "0.41", features = ["bundled"] }
 walkdir = "2.5"
 directories = "6"
 rfd = "0.18"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "query"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

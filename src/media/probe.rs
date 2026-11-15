@@ -262,6 +262,7 @@ pub fn to_media_file(probe: &ProbeOutput, facts: &FileFacts, hdr10_plus: bool) -
         audio,
         subtitles,
         other_streams,
+        provider: None,
     }
 }
 

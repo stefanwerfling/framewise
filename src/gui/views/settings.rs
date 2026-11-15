@@ -5,10 +5,12 @@ use std::sync::mpsc;
 
 use eframe::egui::{self, RichText};
 
-use crate::core::config::{AppConfig, HwBackend};
+use crate::core::config::{AppConfig, HwBackend, SourceKind};
+use crate::core::events::Command;
 use crate::core::paths::{self, ConflictStrategy};
 use crate::gui::{FramewiseApp, theme};
 use crate::i18n::Language;
+use crate::provider::jellyfin::{self, ServerInfo};
 use crate::{tr, trf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +27,10 @@ pub struct SettingsUi {
     draft: AppConfig,
     picker: Option<(PathField, mpsc::Receiver<Option<PathBuf>>)>,
     roots_check: Option<RootsCheck>,
+    /// Last connection test (`None` while none was made or one is running).
+    jellyfin: Option<Result<ServerInfo, String>>,
+    jellyfin_testing: bool,
+    show_api_key: bool,
 }
 
 impl SettingsUi {
@@ -33,7 +39,15 @@ impl SettingsUi {
             draft: config.clone(),
             picker: None,
             roots_check: None,
+            jellyfin: None,
+            jellyfin_testing: false,
+            show_api_key: false,
         }
+    }
+
+    pub fn on_jellyfin(&mut self, result: Result<ServerInfo, String>) {
+        self.jellyfin_testing = false;
+        self.jellyfin = Some(result);
     }
 
     /// Native folder dialog on a separate thread (never blocks the GUI).
@@ -149,10 +163,31 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
     ui.separator();
 
     let mut pick: Option<(PathField, Option<PathBuf>)> = None;
+    let mut test_jellyfin = false;
     egui::ScrollArea::vertical().show(ui, |ui| {
         theme::card().show(ui, |ui| {
             ui.set_width(ui.available_width());
+            ui.label(RichText::new(tr!("Source")).strong());
+            ui.horizontal(|ui| {
+                for kind in SourceKind::ALL {
+                    ui.radio_value(&mut s.draft.source, kind, kind.label());
+                }
+            });
+            if s.draft.source == SourceKind::Jellyfin {
+                ui.label(RichText::new(tr!("Report only: framewise reads what the server knows about each file and rates it against the active profile. The files themselves are not accessed, so these items cannot be added to the queue.")).small().color(theme::MUTED));
+            }
+        });
+
+        if s.draft.source == SourceKind::Jellyfin && jellyfin_card(ui, s) {
+            test_jellyfin = true;
+        }
+
+        theme::card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
             ui.label(RichText::new(tr!("Directories")).strong());
+            if s.draft.source == SourceKind::Jellyfin {
+                ui.label(RichText::new(tr!("Only used for local files.")).small().color(theme::MUTED));
+            }
             egui::Grid::new("dirs").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                 if path_row(ui, tr!("Source directory"), &mut s.draft.source_dir, "/media/movies") {
                     pick = Some((PathField::Source, s.draft.source_dir.clone()));
@@ -349,6 +384,11 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
     if let Some((field, start)) = pick {
         s.pick(field, start);
     }
+    let test = test_jellyfin.then(|| {
+        s.jellyfin_testing = true;
+        s.jellyfin = None;
+        s.draft.jellyfin.clone()
+    });
     if revert {
         s.draft = current;
     } else if save {
@@ -356,4 +396,108 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
         cfg.encoding.active_profile = app.snap.config.encoding.active_profile.clone();
         app.update_config(|c| *c = cfg);
     }
+    if let Some(settings) = test {
+        app.send(Command::TestJellyfin(settings));
+    }
+}
+
+/// Server address, API key, connection test and library choice.
+/// Returns `true` if a connection test was requested.
+fn jellyfin_card(ui: &mut egui::Ui, s: &mut SettingsUi) -> bool {
+    let mut test = false;
+    theme::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new("Jellyfin").strong());
+        let j = &mut s.draft.jellyfin;
+        egui::Grid::new("jellyfin").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+            ui.label(tr!("Server address"));
+            ui.add(
+                egui::TextEdit::singleline(&mut j.url)
+                    .hint_text("http://jellyfin.local:8096")
+                    .desired_width(420.0),
+            );
+            ui.end_row();
+            ui.label(tr!("API key"));
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut j.api_key)
+                        .password(!s.show_api_key)
+                        .desired_width(320.0),
+                );
+                ui.checkbox(&mut s.show_api_key, tr!("show"));
+            });
+            ui.end_row();
+        });
+        ui.label(
+            RichText::new(tr!("Create a key in Jellyfin under Dashboard → API keys. It is stored in the configuration file, readable only by your user."))
+                .small()
+                .color(theme::MUTED),
+        );
+        ui.horizontal(|ui| {
+            let ready = j.is_configured() && !s.jellyfin_testing;
+            if ui
+                .add_enabled(ready, egui::Button::new(tr!("Test connection")))
+                .clicked()
+            {
+                test = true;
+            }
+            if s.jellyfin_testing {
+                ui.spinner();
+            }
+            match &s.jellyfin {
+                Some(Ok(info)) => {
+                    ui.label(
+                        RichText::new(trf!("✔ {} (Jellyfin {})", info.name, info.version))
+                            .color(theme::OK),
+                    );
+                }
+                Some(Err(e)) => {
+                    ui.label(RichText::new(format!("✖ {e}")).color(theme::ERROR));
+                }
+                None => {}
+            }
+        });
+
+        let Some(Ok(info)) = &s.jellyfin else {
+            if !j.libraries.is_empty() {
+                ui.label(
+                    RichText::new(trf!("{} libraries selected – test the connection to change the selection", j.libraries.len()))
+                        .small()
+                        .color(theme::MUTED),
+                );
+            }
+            return;
+        };
+        ui.add_space(4.0);
+        ui.label(tr!("Libraries"));
+        let chosen: Vec<String> = jellyfin::selected(j, &info.libraries)
+            .into_iter()
+            .map(|l| l.id.clone())
+            .collect();
+        for lib in &info.libraries {
+            let mut on = chosen.contains(&lib.id);
+            let kind = lib.collection_type.as_deref().unwrap_or("mixed");
+            let label = format!("{}  ({kind})", lib.name);
+            if ui
+                .add_enabled(lib.is_video(), egui::Checkbox::new(&mut on, label))
+                .on_disabled_hover_text(tr!("Contains no movies or series"))
+                .changed()
+            {
+                let mut ids = chosen.clone();
+                if on {
+                    ids.push(lib.id.clone());
+                } else {
+                    ids.retain(|id| id != &lib.id);
+                }
+                // An empty list means "all"; the last library stays selected.
+                if !ids.is_empty() {
+                    j.libraries = ids;
+                }
+            }
+        }
+        if !j.libraries.is_empty() && ui.small_button(tr!("All movie and series libraries")).clicked() {
+            j.libraries.clear();
+        }
+    });
+    test
 }

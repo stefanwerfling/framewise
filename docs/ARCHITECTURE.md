@@ -82,7 +82,8 @@ framewise/
 │  ├─ scanner/                Discovery, Symlink-Schutz, Duplikate, Ranking
 │  ├─ analyzer/
 │  │  ├─ resolution.rs        Zielauflösung (nie Upscaling, gerade Maße)
-│  │  └─ recommend.rs         Kompatibilität, Potenzial, Empfehlung
+│  │  ├─ recommend.rs         Kompatibilität, Potenzial, Empfehlung
+│  │  └─ report.rs            Gründe je Datei, CSV-Export
 │  ├─ encoding/
 │  │  ├─ profile.rs           Profile A–D, Persistenz
 │  │  ├─ plan.rs              EncodePlan: Stream-Entscheidungen + Warnungen
@@ -95,6 +96,9 @@ framewise/
 │  ├─ queue/                  Job-Modell, Scheduler, Recovery
 │  ├─ monitor/                Ressourcenmonitor, Last-Gate
 │  ├─ persistence/            SQLite-Repository
+│  ├─ provider/               Medienserver als Quelle (nur Bericht)
+│  │  ├─ jellyfin/            API-Client, Antwort-Typen, Abbildung auf MediaFile
+│  │  └─ summary.rs           Übersicht Filme / Serie → Staffel
 │  └─ gui/                    App, Theme, Views (Dashboard … Settings)
 └─ tests/                     Integrationstests (erzeugen Testvideos per ffmpeg)
 ```
@@ -118,6 +122,7 @@ Komplexität, die Module sind trotzdem über `lib.rs` einzeln testbar.
 | `rfd` | Ordnerauswahl-Dialog | nativer Dialog, läuft asynchron |
 | `eframe` Feature `system_fonts` | Glyphen-Fallback | Symbole (→ ✔ ⟳ …), die die eingebetteten egui-Fonts nicht enthalten, kommen aus Systemschriften |
 | `libc` (nur Unix) | `setpriority`, `SIGSTOP/SIGCONT` | Nice-Steuerung und echte Job-Pause |
+| `reqwest` (`rustls`, `json`, `query`) | Jellyfin-API | async auf der vorhandenen Tokio-Runtime; rustls mit den Zertifikaten des Systems, kein OpenSSL nötig |
 | `tempfile` (dev) | Tests | temporäre Verzeichnisse |
 
 Bewusst **nicht** verwendet: `thiserror`/`anyhow` (eigener Fehler-Enum mit lokalisiertem `Display`),
@@ -184,6 +189,32 @@ das Parsen schlägt nie wegen fehlender Metadaten fehl.
    Dateistamm); bestätigt über Teil-Hash (erste/letzte 4 MiB + Größe).
 6. Fortschritt per `AppEvent::ScanProgress`, Abbruch per `CancellationToken`
    (`Arc<AtomicBool>`).
+
+### Medienserver als Quelle (Jellyfin)
+Statt eines lokalen Verzeichnisses kann ein Jellyfin-Server die Quelle sein
+(`AppConfig::source`). framewise hat dann **keinen Zugriff auf die Dateien**
+und liefert nur einen Bericht:
+1. `GET /System/Info` und `GET /Library/VirtualFolders` (Verbindungstest,
+   Bibliotheken). Ohne Auswahl werden alle Film-/Serien-Bibliotheken gelesen.
+2. `GET /Items?ParentId=…&Recursive=true&IncludeItemTypes=Movie,Episode&IsMissing=false&Fields=MediaSources,…`
+   seitenweise (200 Einträge). Server vor 10.9 verlangen einen Benutzer; dann
+   wird über `/Users/{admin}/Items` gelesen.
+3. Jede *Media Source* (Version) wird ein `MediaFile` mit `provider: Some(…)`.
+   Jellyfin ermittelt die Streams selbst mit ffprobe, daher laufen Codec-Namen,
+   Profile und Farbangaben durch dieselbe Klassifikation. `VideoRangeType`
+   ergänzt fehlende Transfer-Angaben älterer Server und Dolby Vision/HDR10+.
+   Es fehlen: Frame-Side-Data, Mastering-Daten, Kapitel. Externe
+   Untertiteldateien zählen nicht als Spur. Einträge ohne Stream-Infos landen
+   unter „Prüfen“.
+4. `absolute_path` ist der Schlüssel `jellyfin://<server>/<source-id>` (keine
+   Kollision mit lokalen Pfaden im Scan-Cache), `relative_path` der Pfad unter
+   dem Bibliotheksordner. Gespeichert wird unter `jellyfin:<url>`.
+5. Die Bibliothek zeigt Titel statt Dateinamen, eine Übersicht Filme /
+   Serie → Staffel und bietet CSV-Export (auch für lokale Quellen). Die
+   Warteschlange nimmt nur lokale Dateien an.
+
+Der API-Schlüssel steht in der Konfigurationsdatei; sie wird mit `0600`
+geschrieben.
 
 ### Encoding Queue
 ```

@@ -2,4 +2,5 @@
 
 pub mod calibration;
 pub mod recommend;
+pub mod report;
 pub mod resolution;

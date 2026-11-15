@@ -11,5 +11,6 @@ pub mod gui;
 pub mod media;
 pub mod monitor;
 pub mod persistence;
+pub mod provider;
 pub mod queue;
 pub mod scanner;

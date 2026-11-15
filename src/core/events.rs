@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::config::AppConfig;
+use super::config::{AppConfig, JellyfinSettings};
 use super::paths::{ConflictResolution, ConflictStrategy};
 use super::tools::ToolInfo;
 use crate::analyzer::recommend::{Analysis, Recommendation};
@@ -15,6 +15,7 @@ use crate::encoding::plan::{PlanBlocker, PlanWarning};
 use crate::encoding::profile::EncodingProfile;
 use crate::media::model::MediaFile;
 use crate::monitor::{GateBlock, ResourceSnapshot};
+use crate::provider::jellyfin::ServerInfo;
 use crate::queue::job::{HistoryEntry, Job, JobId};
 use crate::scanner::{DuplicateGroup, ScanIssue, ScanProgress};
 
@@ -57,6 +58,8 @@ pub enum Command {
     StartScan,
     CancelScan,
     RescanHardware,
+    /// Check the connection and list the libraries (answer: [`AppEvent::Jellyfin`]).
+    TestJellyfin(JellyfinSettings),
     PreviewJobs {
         paths: Vec<PathBuf>,
         profile_id: String,
@@ -117,4 +120,6 @@ pub enum AppEvent {
         level: NoticeLevel,
         text: String,
     },
+    /// Result of [`Command::TestJellyfin`].
+    Jellyfin(Result<ServerInfo, String>),
 }

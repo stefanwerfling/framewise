@@ -3,6 +3,7 @@
 use eframe::egui::{self, RichText};
 
 use crate::analyzer::recommend::Recommendation;
+use crate::core::config::SourceKind;
 use crate::core::events::Command;
 use crate::gui::{FramewiseApp, View, format, theme};
 use crate::queue::job::JobState;
@@ -51,8 +52,13 @@ pub fn scan_controls(app: &mut FramewiseApp, ui: &mut egui::Ui) {
                 }
             }
         } else {
-            let ready =
-                app.snap.config.source_dir.is_some() && app.snap.config.target_dir.is_some();
+            let cfg = &app.snap.config;
+            let jellyfin = cfg.source == SourceKind::Jellyfin;
+            let ready = if jellyfin {
+                cfg.jellyfin.is_configured()
+            } else {
+                cfg.source_dir.is_some() && cfg.target_dir.is_some()
+            };
             let resp = ui.add_enabled(
                 ready,
                 egui::Button::new(RichText::new(tr!("⟳ Scan source")).strong()),
@@ -62,15 +68,24 @@ pub fn scan_controls(app: &mut FramewiseApp, ui: &mut egui::Ui) {
             }
             if !ready {
                 ui.label(
-                    RichText::new(tr!("Set source and target directory in the settings first"))
-                        .color(theme::WARN),
+                    RichText::new(if jellyfin {
+                        tr!("Enter the Jellyfin server address and API key in the settings first")
+                    } else {
+                        tr!("Set source and target directory in the settings first")
+                    })
+                    .color(theme::WARN),
                 );
                 if ui.link(tr!("Open settings")).clicked() {
                     app.view = View::Settings;
                 }
             }
         }
-        if let Some(src) = &app.snap.config.source_dir {
+        if app.snap.config.source == SourceKind::Jellyfin {
+            let url = &app.snap.config.jellyfin.url;
+            if !url.is_empty() {
+                ui.label(RichText::new(format!("Jellyfin  ·  {url}")).color(theme::MUTED));
+            }
+        } else if let Some(src) = &app.snap.config.source_dir {
             let text = format!(
                 "{}  →  {}",
                 src.display(),

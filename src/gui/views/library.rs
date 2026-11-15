@@ -3,17 +3,20 @@
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 
 use eframe::egui::{self, RichText};
 use egui_extras::{Column, TableBuilder};
 
 use super::dashboard::scan_controls;
 use crate::analyzer::recommend::{Compatibility, Recommendation};
+use crate::analyzer::report;
+use crate::core::events::NoticeLevel;
 use crate::core::events::{Command, LibraryEntry};
 use crate::encoding::plan::{AudioAction, SubtitleAction, VideoAction};
 use crate::gui::{FramewiseApp, format, selected_set, theme};
 use crate::media::model::{HdrFormat, SubtitleKind};
+use crate::provider::summary::{self, Counts, LibrarySummary};
 use crate::{tr, trf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -48,6 +51,10 @@ pub struct LibraryUi {
     pub selected: HashSet<PathBuf>,
     pub focus: Option<PathBuf>,
     cache: Option<(usize, u64, Vec<usize>)>,
+    /// Running CSV export: path chosen in the save dialog.
+    export: Option<(String, mpsc::Receiver<Option<PathBuf>>)>,
+    /// Series overview of the library behind the pointer.
+    overview: Option<(usize, Arc<LibrarySummary>)>,
 }
 
 impl Default for LibraryUi {
@@ -64,6 +71,8 @@ impl Default for LibraryUi {
             selected: HashSet::new(),
             focus: None,
             cache: None,
+            export: None,
+            overview: None,
         }
     }
 }
@@ -109,7 +118,11 @@ impl LibraryUi {
                         .relative_path
                         .to_string_lossy()
                         .to_lowercase()
-                        .contains(&needle))
+                        .contains(&needle)
+                    || e.media
+                        .provider
+                        .as_ref()
+                        .is_some_and(|p| p.display_title().to_lowercase().contains(&needle)))
                     && match self.rec_filter {
                         RecFilter::All => true,
                         RecFilter::Actionable => matches!(
@@ -130,9 +143,9 @@ impl LibraryUi {
             let ord = match self.sort {
                 SortKey::Name => x
                     .media
-                    .file_name
+                    .display_name()
                     .to_lowercase()
-                    .cmp(&y.media.file_name.to_lowercase()),
+                    .cmp(&y.media.display_name().to_lowercase()),
                 SortKey::Folder => x.media.folder().cmp(&y.media.folder()),
                 SortKey::Size => x.media.size_bytes.cmp(&y.media.size_bytes),
                 SortKey::Resolution => pixels(x).cmp(&pixels(y)),
@@ -268,6 +281,13 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
     });
 
     let rows = app.library_ui.visible(&lib);
+    // Media server items: report only, no queue.
+    let remote = lib.first().is_some_and(|e| !e.media.is_local());
+    poll_export(app);
+
+    if remote {
+        series_overview(app, ui, &lib);
+    }
 
     // ---- selection / actions
     ui.horizontal_wrapped(|ui| {
@@ -287,6 +307,19 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
         }
         if ui.button(tr!("Select none")).clicked() {
             app.library_ui.selected.clear();
+        }
+        ui.separator();
+        if ui
+            .add_enabled(
+                !rows.is_empty() && app.library_ui.export.is_none(),
+                egui::Button::new(trf!("Export shown as CSV ({})", rows.len())),
+            )
+            .clicked()
+        {
+            start_export(app, &lib, &rows);
+        }
+        if remote {
+            return;
         }
         ui.separator();
         let profile_id = app.snap.config.encoding.active_profile.clone();
@@ -425,7 +458,7 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
                         }
                     });
                     row.col(|ui| {
-                        let mut text = RichText::new(&e.media.file_name);
+                        let mut text = RichText::new(e.media.display_name());
                         if e.top_global {
                             text = text.strong();
                         }
@@ -549,12 +582,27 @@ fn opt<T: ToString>(v: &Option<T>) -> String {
 fn details(ui: &mut egui::Ui, e: &LibraryEntry) {
     let m = &e.media;
     let a = &e.analysis;
-    ui.heading(&m.file_name);
-    ui.label(
-        RichText::new(m.absolute_path.display().to_string())
-            .small()
-            .color(theme::MUTED),
-    );
+    ui.heading(m.display_name());
+    match &m.provider {
+        Some(p) => {
+            ui.label(RichText::new(&p.server_path).small().color(theme::MUTED));
+            ui.label(
+                RichText::new(trf!(
+                    "Stream information as reported by {} – the file itself was not read",
+                    p.provider.label()
+                ))
+                .small()
+                .color(theme::WARN),
+            );
+        }
+        None => {
+            ui.label(
+                RichText::new(m.absolute_path.display().to_string())
+                    .small()
+                    .color(theme::MUTED),
+            );
+        }
+    }
     ui.add_space(4.0);
 
     ui.horizontal(|ui| {
@@ -881,4 +929,149 @@ fn details(ui: &mut egui::Ui, e: &LibraryEntry) {
                 ));
             }
         });
+}
+
+/// Save dialog on its own thread; the CSV is built right away from the
+/// rows shown now and written once a path was chosen.
+fn start_export(app: &mut FramewiseApp, lib: &Arc<Vec<LibraryEntry>>, rows: &[usize]) {
+    let csv = report::to_csv(rows.iter().map(|&i| (&lib[i].media, &lib[i].analysis)));
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let path = rfd::FileDialog::new()
+            .set_file_name("framewise.csv")
+            .add_filter("CSV", &["csv"])
+            .save_file();
+        let _ = tx.send(path);
+    });
+    app.library_ui.export = Some((csv, rx));
+}
+
+fn poll_export(app: &mut FramewiseApp) {
+    let Some((_, rx)) = &app.library_ui.export else {
+        return;
+    };
+    let path = match rx.try_recv() {
+        Ok(path) => path,
+        Err(mpsc::TryRecvError::Empty) => return,
+        Err(mpsc::TryRecvError::Disconnected) => None,
+    };
+    let Some((csv, _)) = app.library_ui.export.take() else {
+        return;
+    };
+    if let Some(path) = path {
+        match std::fs::write(&path, csv) {
+            Ok(()) => app.notify(NoticeLevel::Info, trf!("Exported to {}", path.display())),
+            Err(e) => app.notify(
+                NoticeLevel::Error,
+                trf!("Export to {} failed: {}", path.display(), e),
+            ),
+        }
+    }
+}
+
+/// `12 of 40 to process (8 re-encode, 4 remux) · 2 review`
+fn counts_text(c: &Counts) -> String {
+    let mut text = trf!(
+        "{} of {} to process ({} re-encode, {} remux)",
+        c.actionable(),
+        c.total,
+        c.transcode,
+        c.remux
+    );
+    if c.review > 0 {
+        text.push_str(&trf!(" · {} to review", c.review));
+    }
+    text
+}
+
+fn counts_color(c: &Counts) -> egui::Color32 {
+    if c.review > 0 {
+        theme::ERROR
+    } else if c.actionable() > 0 {
+        theme::WARN
+    } else {
+        theme::OK
+    }
+}
+
+/// Movies and series → seasons with the number of items to process.
+/// Clicking a series filters the table to it.
+fn series_overview(app: &mut FramewiseApp, ui: &mut egui::Ui, lib: &Arc<Vec<LibraryEntry>>) {
+    let ptr = Arc::as_ptr(lib) as usize;
+    let summary = match &app.library_ui.overview {
+        Some((p, s)) if *p == ptr => s.clone(),
+        _ => {
+            let s = Arc::new(summary::summarize(lib.iter().filter_map(|e| {
+                e.media
+                    .provider
+                    .as_ref()
+                    .map(|p| (p, e.analysis.recommendation))
+            })));
+            app.library_ui.overview = Some((ptr, s.clone()));
+            s
+        }
+    };
+    egui::CollapsingHeader::new(RichText::new(tr!("Overview by series")).strong())
+        .id_salt("series_overview")
+        .default_open(false)
+        .show(ui, |ui| {
+            if summary.movies.total > 0 {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(tr!("Movies")).strong());
+                    ui.label(
+                        RichText::new(counts_text(&summary.movies))
+                            .color(counts_color(&summary.movies)),
+                    );
+                });
+            }
+            if summary.episodes.total > 0 {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(tr!("Episodes")).strong());
+                    ui.label(
+                        RichText::new(counts_text(&summary.episodes))
+                            .color(counts_color(&summary.episodes)),
+                    );
+                });
+            }
+            egui::ScrollArea::vertical()
+                .id_salt("series_overview_scroll")
+                .max_height(260.0)
+                .show(ui, |ui| {
+                    for series in &summary.series {
+                        let name = if series.name.is_empty() {
+                            tr!("Unknown series").to_string()
+                        } else {
+                            series.name.clone()
+                        };
+                        let header = egui::CollapsingHeader::new(
+                            RichText::new(format!("{name}  –  {}", counts_text(&series.counts)))
+                                .color(counts_color(&series.counts)),
+                        )
+                        .id_salt(("series", &series.name))
+                        .show(ui, |ui| {
+                            for season in &series.seasons {
+                                let label = match season.season {
+                                    Some(0) => tr!("Specials").to_string(),
+                                    Some(n) => trf!("Season {}", n),
+                                    None => tr!("Without season").to_string(),
+                                };
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{label}: {}",
+                                        counts_text(&season.counts)
+                                    ))
+                                    .color(counts_color(&season.counts)),
+                                );
+                            }
+                            if ui.small_button(tr!("Show in table")).clicked() {
+                                app.library_ui.search = series.name.clone();
+                            }
+                        });
+                        header
+                            .header_response
+                            .on_hover_text(tr!("Expand for the seasons"));
+                    }
+                });
+        });
+    ui.separator();
 }

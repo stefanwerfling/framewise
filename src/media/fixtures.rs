@@ -110,5 +110,6 @@ pub fn media(
         audio,
         subtitles,
         other_streams: vec![],
+        provider: None,
     }
 }

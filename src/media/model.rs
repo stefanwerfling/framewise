@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::analyzer::resolution::CropRect;
+use crate::provider::ProviderInfo;
 
 use crate::{tr, trf};
 
@@ -473,9 +474,26 @@ pub struct MediaFile {
     pub subtitles: Vec<SubtitleStream>,
     /// Streams ffprobe reported but we do not handle (data, attachments).
     pub other_streams: Vec<String>,
+    /// Set for items of a media server: `absolute_path` is then only a key,
+    /// not a local file.
+    #[serde(default)]
+    pub provider: Option<ProviderInfo>,
 }
 
 impl MediaFile {
+    /// Only local files can be encoded.
+    pub fn is_local(&self) -> bool {
+        self.provider.is_none()
+    }
+
+    /// Name shown in lists: the file name, or the title for server items.
+    pub fn display_name(&self) -> String {
+        match &self.provider {
+            Some(p) => p.display_title(),
+            None => self.file_name.clone(),
+        }
+    }
+
     /// The main video stream (first non-cover-art stream).
     pub fn primary_video(&self) -> Option<&VideoStream> {
         self.video.iter().find(|v| !v.attached_pic)

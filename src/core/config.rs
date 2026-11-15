@@ -9,6 +9,26 @@ use super::paths::ConflictStrategy;
 use crate::i18n::Language;
 use crate::tr;
 
+/// Write `data` to `path`, readable only by the user (the config holds the
+/// Jellyfin API key).
+fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        options.mode(0o600);
+        // `mode` only applies to new files.
+        if path.exists() {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    let mut file = options.open(path)?;
+    file.write_all(data)?;
+    file.sync_all()
+}
+
 /// Platform specific application directories.
 #[derive(Debug, Clone)]
 pub struct AppDirs {
@@ -206,16 +226,58 @@ impl Default for UiSettings {
     }
 }
 
+/// Where the library comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum SourceKind {
+    /// Files in the local source directory (scanned with ffprobe).
+    #[default]
+    Local,
+    /// Items of a Jellyfin server, read through its API (report only).
+    Jellyfin,
+}
+
+impl SourceKind {
+    pub const ALL: [SourceKind; 2] = [SourceKind::Local, SourceKind::Jellyfin];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SourceKind::Local => tr!("Local directory"),
+            SourceKind::Jellyfin => "Jellyfin",
+        }
+    }
+}
+
+/// Connection to a Jellyfin server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct JellyfinSettings {
+    /// Base URL, e.g. `http://jellyfin.local:8096`.
+    pub url: String,
+    /// API key (Dashboard → API keys). Stored in the config file, which is
+    /// only readable by the user.
+    pub api_key: String,
+    /// Library ids to read; empty = all movie and series libraries.
+    pub libraries: Vec<String>,
+}
+
+impl JellyfinSettings {
+    pub fn is_configured(&self) -> bool {
+        !self.url.trim().is_empty() && !self.api_key.trim().is_empty()
+    }
+}
+
 /// Complete persisted configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     pub ffmpeg_path: PathBuf,
     pub ffprobe_path: PathBuf,
+    pub source: SourceKind,
     pub source_dir: Option<PathBuf>,
     pub target_dir: Option<PathBuf>,
     /// Working directory for temporary files; `None` = data dir.
     pub work_dir: Option<PathBuf>,
+    pub jellyfin: JellyfinSettings,
     pub scan: ScanSettings,
     pub encoding: EncodingSettings,
     pub resources: ResourceSettings,
@@ -227,9 +289,11 @@ impl Default for AppConfig {
         Self {
             ffmpeg_path: "ffmpeg".into(),
             ffprobe_path: "ffprobe".into(),
+            source: SourceKind::Local,
             source_dir: None,
             target_dir: None,
             work_dir: None,
+            jellyfin: JellyfinSettings::default(),
             scan: ScanSettings::default(),
             encoding: EncodingSettings::default(),
             resources: ResourceSettings::default(),
@@ -257,8 +321,21 @@ impl AppConfig {
         }
         let text = toml::to_string_pretty(self).map_err(|e| Error::Config(e.to_string()))?;
         let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, text).map_err(|e| Error::io(&tmp, e))?;
+        write_private(&tmp, text.as_bytes()).map_err(|e| Error::io(&tmp, e))?;
         std::fs::rename(&tmp, path).map_err(|e| Error::io(path, e))
+    }
+
+    /// Key of the stored scan for the active source.
+    pub fn library_key(&self) -> Option<PathBuf> {
+        match self.source {
+            SourceKind::Local => self.source_dir.clone(),
+            SourceKind::Jellyfin => self.jellyfin.is_configured().then(|| {
+                PathBuf::from(format!(
+                    "jellyfin:{}",
+                    self.jellyfin.url.trim().trim_end_matches('/')
+                ))
+            }),
+        }
     }
 
     /// Work directory for temporary encodes. Default: a hidden directory in
@@ -304,6 +381,37 @@ mod tests {
         };
         cfg.save(&path).unwrap();
         assert_eq!(AppConfig::load(&path).unwrap(), cfg);
+    }
+
+    #[test]
+    fn jellyfin_settings_roundtrip_privately() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let cfg = AppConfig {
+            source: SourceKind::Jellyfin,
+            jellyfin: JellyfinSettings {
+                url: "http://jf.local:8096/".into(),
+                api_key: "secret".into(),
+                libraries: vec!["abc".into()],
+            },
+            ..AppConfig::default()
+        };
+        cfg.save(&path).unwrap();
+        assert_eq!(AppConfig::load(&path).unwrap(), cfg);
+        assert_eq!(
+            cfg.library_key(),
+            Some(PathBuf::from("jellyfin:http://jf.local:8096"))
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        // Old configs without the new fields keep the local source.
+        let old: AppConfig = toml::from_str("source_dir = \"/m\"").unwrap();
+        assert_eq!(old.source, SourceKind::Local);
+        assert_eq!(old.library_key(), Some(PathBuf::from("/m")));
     }
 
     #[test]

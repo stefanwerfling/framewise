@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use super::config::{AppConfig, AppDirs};
+use super::config::{AppConfig, AppDirs, JellyfinSettings, SourceKind};
 use super::desktop_notify;
 use super::events::{
     AppEvent, Command, JobPreviewItem, JobRequest, Library, LibraryEntry, NoticeLevel,
@@ -30,6 +30,7 @@ use crate::i18n;
 use crate::media::model::MediaFile;
 use crate::monitor::{self, GateBlock, Monitor, ResourceSnapshot};
 use crate::persistence::Database;
+use crate::provider::jellyfin;
 use crate::queue::finalize::{self, RealFs, Recovery};
 use crate::queue::job::{self, HistoryEntry, Job, JobId, JobState, now_unix};
 use crate::queue::runner::{self, RunOutcome, RunnerContext, RunnerEvent};
@@ -67,7 +68,10 @@ enum Internal {
     Hardware(HardwareCaps),
     Resources(ResourceSnapshot),
     ScanProgress(scanner::ScanProgress),
-    ScanDone(Roots, ScanOutcome),
+    /// Key of the stored library (see `AppConfig::library_key`) and result.
+    ScanDone(PathBuf, ScanOutcome),
+    ScanFailed(String),
+    Jellyfin(std::result::Result<jellyfin::ServerInfo, String>),
     Job(JobId, RunnerEvent),
     JobDone(JobId, RunOutcome),
 }
@@ -304,14 +308,8 @@ impl Backend {
         self.send_queue_state();
         self.send_history();
 
-        // Cached scan of the configured source.
-        if let Ok(roots) = self.roots()
-            && let Ok(cache) = self.db.load_media_cache(&roots.source)
-        {
-            let mut media: Vec<MediaFile> = cache.into_values().collect();
-            media.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
-            self.media = media;
-        }
+        // Last scan of the configured source.
+        self.load_stored_library();
         self.publish_library();
 
         self.detect_tools();
@@ -459,6 +457,7 @@ impl Backend {
                 }
             }
             Command::RescanHardware => self.detect_tools(),
+            Command::TestJellyfin(settings) => self.test_jellyfin(settings),
             Command::PreviewJobs {
                 paths,
                 profile_id,
@@ -565,7 +564,7 @@ impl Backend {
             || cfg.resources.vaapi_device != self.config.resources.vaapi_device;
         let library_changed = cfg.encoding.active_profile != self.config.encoding.active_profile
             || cfg.scan.top_n_per_folder != self.config.scan.top_n_per_folder;
-        let source_changed = cfg.source_dir != self.config.source_dir;
+        let source_changed = cfg.library_key() != self.config.library_key();
         self.config = cfg;
         i18n::set_language(
             self.config
@@ -580,15 +579,7 @@ impl Backend {
             self.detect_tools();
         }
         if source_changed {
-            self.media.clear();
-            self.duplicates.clear();
-            if let Ok(roots) = self.roots()
-                && let Ok(cache) = self.db.load_media_cache(&roots.source)
-            {
-                self.media = cache.into_values().collect();
-                self.media
-                    .sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
-            }
+            self.load_stored_library();
         }
         if library_changed || source_changed {
             self.publish_library();
@@ -596,8 +587,25 @@ impl Backend {
         self.emit(AppEvent::Config(Box::new(self.config.clone())));
     }
 
+    /// Show the stored result of the last scan of the active source.
+    fn load_stored_library(&mut self) {
+        self.media.clear();
+        self.duplicates.clear();
+        if let Some(key) = self.config.library_key()
+            && let Ok(cache) = self.db.load_media_cache(&key)
+        {
+            self.media = cache.into_values().collect();
+            self.media
+                .sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+        }
+    }
+
     fn start_scan(&mut self) {
         if self.scan_cancel.is_some() {
+            return;
+        }
+        if self.config.source == SourceKind::Jellyfin {
+            self.start_jellyfin_scan();
             return;
         }
         let roots = match self.roots() {
@@ -633,7 +641,40 @@ impl Backend {
                 let _ = ptx.send(Internal::ScanProgress(p));
             })
             .await;
-            let _ = tx.send(Internal::ScanDone(roots, outcome));
+            let _ = tx.send(Internal::ScanDone(roots.source, outcome));
+        });
+    }
+
+    fn start_jellyfin_scan(&mut self) {
+        let settings = self.config.jellyfin.clone();
+        let Some(key) = self.config.library_key() else {
+            self.notice(
+                NoticeLevel::Error,
+                tr!("Enter the Jellyfin server address and API key in the settings first"),
+            );
+            return;
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.scan_cancel = Some(cancel.clone());
+        let tx = self.internal.clone();
+        tokio::spawn(async move {
+            let ptx = tx.clone();
+            let result = jellyfin::scan(&settings, cancel, move |p| {
+                let _ = ptx.send(Internal::ScanProgress(p));
+            })
+            .await;
+            let _ = tx.send(match result {
+                Ok(outcome) => Internal::ScanDone(key, outcome),
+                Err(e) => Internal::ScanFailed(e.message),
+            });
+        });
+    }
+
+    fn test_jellyfin(&self, settings: JellyfinSettings) {
+        let tx = self.internal.clone();
+        tokio::spawn(async move {
+            let result = jellyfin::connect(&settings).await.map_err(|e| e.message);
+            let _ = tx.send(Internal::Jellyfin(result));
         });
     }
 
@@ -674,10 +715,15 @@ impl Backend {
             .map(|j| j.media.absolute_path.as_path())
             .collect();
         let mut items = Vec::new();
+        let mut remote = 0;
         for path in paths {
             let Some(m) = self.media.iter().find(|m| &m.absolute_path == path) else {
                 continue;
             };
+            if !m.is_local() {
+                remote += 1;
+                continue;
+            }
             let analysis = recommend::analyze_calibrated(m, &profile, &caps, &self.calibration);
             let desired = paths::target_for_relative(&roots.target, &m.relative_path, "mp4");
             let resolution =
@@ -696,6 +742,15 @@ impl Backend {
                 blockers: analysis.plan.blockers.clone(),
                 already_queued: queued_sources.contains(m.absolute_path.as_path()),
             });
+        }
+        if remote > 0 {
+            self.notice(
+                NoticeLevel::Warning,
+                trf!(
+                    "{} item(s) of the media server skipped – only local files can be encoded",
+                    remote
+                ),
+            );
         }
         self.emit(AppEvent::JobPreview { profile_id, items });
     }
@@ -806,14 +861,27 @@ impl Backend {
                 self.emit(AppEvent::Resources(Box::new(snap)));
             }
             Internal::ScanProgress(p) => self.emit(AppEvent::ScanProgress(p)),
-            Internal::ScanDone(roots, outcome) => {
+            Internal::ScanFailed(error) => {
+                self.scan_cancel = None;
+                self.emit(AppEvent::ScanFinished {
+                    files: self.media.len(),
+                    reused: 0,
+                    issues: vec![scanner::ScanIssue {
+                        path: PathBuf::from("Jellyfin"),
+                        message: error,
+                    }],
+                    duplicates: Vec::new(),
+                    cancelled: true,
+                });
+            }
+            Internal::Jellyfin(result) => self.emit(AppEvent::Jellyfin(result)),
+            Internal::ScanDone(root, outcome) => {
                 self.scan_cancel = None;
                 if !outcome.cancelled {
                     self.media = outcome.files;
                     self.duplicates = outcome.duplicates.clone();
                     let db = self.db.clone();
                     let media = self.media.clone();
-                    let root = roots.source.clone();
                     tokio::task::spawn_blocking(move || {
                         if let Err(e) = db.replace_media(&root, &media) {
                             tracing::error!("storing scan failed: {e}");
