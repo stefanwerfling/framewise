@@ -240,6 +240,10 @@ fn map_video(
         attached_pic,
         crop: None,
         hdr_metadata: None,
+        variable_frame_rate: crate::media::model::is_variable_frame_rate(
+            s.real_frame_rate,
+            s.average_frame_rate,
+        ),
     }
 }
 

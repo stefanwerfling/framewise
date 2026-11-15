@@ -96,6 +96,7 @@ framewise/
 │  ├─ queue/                  Job-Modell, Scheduler, Recovery
 │  ├─ monitor/                Ressourcenmonitor, Last-Gate
 │  ├─ persistence/            SQLite-Repository
+│  ├─ health/                 Zustandsprüfung: Abspielrisiko + Schnellprüfung
 │  ├─ provider/               Medienserver als Quelle (nur Bericht)
 │  │  ├─ jellyfin/            API-Client, Antwort-Typen, Abbildung auf MediaFile
 │  │  └─ summary.rs           Übersicht Filme / Serie → Staffel
@@ -225,6 +226,48 @@ auf Bibliothek/Datei bzw. Serie/Staffel/Datei zurück).
 
 Schlüssel bzw. Token stehen in der Konfigurationsdatei; sie wird mit `0600`
 geschrieben.
+
+### Zustandsprüfung (defekte Dateien)
+
+Zwei Stufen, beide für lokale Dateien und Jellyfin:
+
+1. **Abspielrisiko** (`health::risk`, ohne Dateizugriff): aus den Scan-Daten
+   und dem eingestellten Abspielgerät (`HealthSettings`, Standard: Android TV /
+   Fire TV mit Jellyfin-App). Gemeldet wird, was der Server live umwandeln
+   müsste (VC-1/MPEG-2/MPEG-4 ASP, H.264 10 Bit, Interlaced, DV-Profil 5 ohne
+   DV-Decoder, DTS/TrueHD, automatisch eingeblendete PGS/ASS-Untertitel,
+   AVI/WMV …, Auflösung/Bitrate über der Grenze) sowie variable Bildrate
+   (`r_frame_rate` ≠ `avg_frame_rate`, bei Jellyfin `RealFrameRate` ≠
+   `AverageFrameRate`). Wird bei jedem `publish_library` neu berechnet.
+2. **Schnellprüfung** (`health::check`, per Knopf): ffprobe liest
+   - den Kopf: Startzeit und Länge von Bild und Haupttonspur → Versatz
+     > 100 ms, Längenunterschied > 3 s;
+   - den MP4-Aufbau: die obersten Boxen per Range-Request (lokal per Seek);
+     liegt `moov` hinter `mdat` (ffmpeg ohne `-movflags +faststart`), muss der
+     Player erst das Dateiende laden → Abspielrisiko „Inhaltsverzeichnis am
+     Ende“ mit Größe;
+   - N Stichproben à S Sekunden (Standard 6 × 3 s), die erste immer bei 0:00,
+     die übrigen gleichmäßig verteilt,
+     mit `-read_intervals` und `-show_frames` (dekodiert). Bild- und Tonspur
+     werden **einzeln** gewählt (`-select_streams <index>`): ein Cover-Bild
+     mit Zeitstempel 0 bricht sonst das Leseintervall ab.
+   - Ausgewertet: Dekodierfehler (eindeutige Meldungen oder ≥ 3 Zeilen;
+     typische Meldungen direkt nach dem Springen wie „Could not find ref with
+     POC“ werden ignoriert), kein dekodiertes Bild, Lücken (> 100 ms Ton,
+     > 500 ms Bild) und rückwärts laufende Zeitstempel.
+   - Jellyfin: Eingabe ist `/Videos/{id}/stream?static=true&mediaSourceId=…`
+     mit `Authorization`-Header; ffprobe springt per Range-Request, übertragen
+     werden nur Kopf und Stichproben. Netzwerkfehler ergeben „Prüfung
+     fehlgeschlagen“, nie „defekt“ (eine Wiederholung pro Stichprobe).
+     Hinweis: Das Token steht dabei in der Kommandozeile von ffprobe und ist
+     für andere lokale Benutzer per `ps` sichtbar.
+
+Bewertung: **Defekt** (unlesbar, Dekodierfehler) > **Verdacht** (Versatz,
+Lücken, Längen, Zeitsprünge) > **Abspielrisiko** > OK/ungeprüft. Ergebnisse
+liegen in der Tabelle `health` (Schema-Version 2) mit einem Fingerabdruck
+(Größe, Änderungszeit, Media-Source-Id) und `CHECK_VERSION`; geänderte Dateien
+und Ergebnisse älterer Prüfversionen gelten wieder als ungeprüft. Der Lauf ist abbrechbar, prüft `parallel` Dateien gleichzeitig und
+aktualisiert die Bibliothek höchstens alle 3 s.
 
 ### Encoding Queue
 ```

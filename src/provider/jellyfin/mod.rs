@@ -174,6 +174,23 @@ where
     Ok(outcome)
 }
 
+/// The original file of a server item, for ffprobe (range requests, no
+/// conversion by the server).
+pub fn stream_input(
+    settings: &JellyfinSettings,
+    info: &crate::provider::ProviderInfo,
+) -> crate::health::check::Input {
+    crate::health::check::Input::Http {
+        url: format!(
+            "{}/Videos/{}/stream?static=true&mediaSourceId={}",
+            settings.url.trim().trim_end_matches('/'),
+            info.item_id,
+            info.media_source_id
+        ),
+        authorization: client::authorization(&settings.api_key, &settings.device_id),
+    }
+}
+
 /// A new id for [`JellyfinSettings::device_id`].
 pub fn new_device_id() -> String {
     use std::hash::{BuildHasher, Hasher};

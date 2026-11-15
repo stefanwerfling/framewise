@@ -26,6 +26,7 @@ use crate::encoding::os::CAN_SUSPEND;
 use crate::encoding::plan::{self, PlanCapabilities};
 use crate::encoding::process::ProcessHandle;
 use crate::encoding::profile::EncodingProfile;
+use crate::health;
 use crate::i18n;
 use crate::media::model::MediaFile;
 use crate::monitor::{self, GateBlock, Monitor, ResourceSnapshot};
@@ -73,6 +74,9 @@ enum Internal {
     ScanFailed(String),
     Jellyfin(std::result::Result<jellyfin::ServerInfo, String>),
     QuickConnect(jellyfin::QuickConnectEvent),
+    HealthStarted(PathBuf),
+    HealthChecked(PathBuf, Box<health::CheckReport>),
+    HealthDone,
     Job(JobId, RunnerEvent),
     JobDone(JobId, RunOutcome),
 }
@@ -97,8 +101,20 @@ struct Backend {
     snapshot: ResourceSnapshot,
     scan_cancel: Option<Arc<AtomicBool>>,
     quick_connect_cancel: Option<Arc<AtomicBool>>,
+    /// Stored quick checks by media path.
+    health: HashMap<PathBuf, health::CheckReport>,
+    health_run: Option<HealthRun>,
     /// Size-estimate correction from finished jobs.
     calibration: SizeCalibration,
+}
+
+/// A running quick check.
+struct HealthRun {
+    cancel: Arc<AtomicBool>,
+    progress: crate::core::events::HealthProgress,
+    /// Results arrived since the library was last published.
+    dirty: bool,
+    published: std::time::Instant,
 }
 
 /// Start the backend thread.
@@ -187,6 +203,8 @@ impl Backend {
             snapshot: ResourceSnapshot::default(),
             scan_cancel: None,
             quick_connect_cancel: None,
+            health: HashMap::new(),
+            health_run: None,
             calibration: SizeCalibration::default(),
         }
     }
@@ -283,6 +301,10 @@ impl Backend {
             Err(e) => self.notice(NoticeLevel::Error, e.to_string()),
         }
         self.emit(AppEvent::Profiles(self.profiles.clone()));
+        match self.db.load_health() {
+            Ok(h) => self.health = h,
+            Err(e) => tracing::warn!("cannot load health checks: {e}"),
+        }
 
         // Job recovery.
         match self.db.load_jobs() {
@@ -441,6 +463,14 @@ impl Backend {
                 top_global: top_global.contains(&i),
                 duplicate: dup_paths.contains(m.absolute_path.as_path()),
                 queued: queued.contains(m.absolute_path.as_path()),
+                health: health::Health {
+                    risks: health::risk::assess(m, &self.config.health),
+                    check: self
+                        .health
+                        .get(&m.absolute_path)
+                        .filter(|r| r.is_current(&health::fingerprint(m)))
+                        .cloned(),
+                },
                 media: m.clone(),
             })
             .collect();
@@ -462,6 +492,12 @@ impl Backend {
             Command::RescanHardware => self.detect_tools(),
             Command::TestJellyfin(settings) => self.test_jellyfin(settings),
             Command::QuickConnect { url, device_id } => self.quick_connect(url, device_id),
+            Command::CheckHealth { paths, recheck } => self.start_health_check(&paths, recheck),
+            Command::CancelHealthCheck => {
+                if let Some(run) = &self.health_run {
+                    run.cancel.store(true, Ordering::Relaxed);
+                }
+            }
             Command::CancelQuickConnect => {
                 if let Some(c) = self.quick_connect_cancel.take() {
                     c.store(true, Ordering::Relaxed);
@@ -572,6 +608,7 @@ impl Backend {
             || cfg.ffprobe_path != self.config.ffprobe_path
             || cfg.resources.vaapi_device != self.config.resources.vaapi_device;
         let library_changed = cfg.encoding.active_profile != self.config.encoding.active_profile
+            || cfg.health != self.config.health
             || cfg.scan.top_n_per_folder != self.config.scan.top_n_per_folder;
         let source_changed = cfg.library_key() != self.config.library_key();
         self.config = cfg;
@@ -705,6 +742,93 @@ impl Backend {
                 },
             )
             .await;
+        });
+    }
+
+    fn start_health_check(&mut self, paths: &[PathBuf], recheck: bool) {
+        if self.health_run.is_some() {
+            self.notice(NoticeLevel::Warning, tr!("A check is already running"));
+            return;
+        }
+        let wanted: HashSet<&Path> = paths.iter().map(PathBuf::as_path).collect();
+        let jellyfin = self.config.jellyfin.clone();
+        let items: Vec<(PathBuf, String, String, health::check::Input)> = self
+            .media
+            .iter()
+            .filter(|m| wanted.contains(m.absolute_path.as_path()))
+            .filter(|m| {
+                recheck
+                    || !self.health.get(&m.absolute_path).is_some_and(|r| {
+                        r.failed.is_none() && r.is_current(&health::fingerprint(m))
+                    })
+            })
+            .map(|m| {
+                let input = match &m.provider {
+                    Some(info) => jellyfin::stream_input(&jellyfin, info),
+                    None => health::check::Input::File(m.absolute_path.clone()),
+                };
+                (
+                    m.absolute_path.clone(),
+                    m.display_name(),
+                    health::fingerprint(m),
+                    input,
+                )
+            })
+            .collect();
+        if items.is_empty() {
+            self.notice(
+                NoticeLevel::Info,
+                tr!("All chosen files were checked already – use 'check again' to repeat"),
+            );
+            return;
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        let progress = crate::core::events::HealthProgress {
+            done: 0,
+            total: items.len(),
+            defect: 0,
+            suspect: 0,
+            current: String::new(),
+        };
+        self.emit(AppEvent::HealthProgress(Some(progress.clone())));
+        self.health_run = Some(HealthRun {
+            cancel: cancel.clone(),
+            progress,
+            dirty: false,
+            published: std::time::Instant::now(),
+        });
+
+        let ffprobe = self.config.ffprobe_path.clone();
+        let options = health::check::CheckOptions {
+            samples: self.config.health.samples.clamp(1, 20),
+            sample_seconds: self.config.health.sample_seconds.clamp(1, 30),
+        };
+        let parallel = self.config.health.parallel.clamp(1, 8) as usize;
+        let tx = self.internal.clone();
+        tokio::spawn(async move {
+            let mut queue = items.into_iter();
+            let mut running = tokio::task::JoinSet::new();
+            loop {
+                while running.len() < parallel && !cancel.load(Ordering::Relaxed) {
+                    let Some((path, name, fingerprint, input)) = queue.next() else {
+                        break;
+                    };
+                    let _ = tx.send(Internal::HealthStarted(PathBuf::from(name)));
+                    let (ffprobe, cancel, tx) = (ffprobe.clone(), cancel.clone(), tx.clone());
+                    running.spawn(async move {
+                        if let Some(report) =
+                            health::check::run(&ffprobe, &input, fingerprint, options, &cancel)
+                                .await
+                        {
+                            let _ = tx.send(Internal::HealthChecked(path, Box::new(report)));
+                        }
+                    });
+                }
+                if running.join_next().await.is_none() {
+                    break;
+                }
+            }
+            let _ = tx.send(Internal::HealthDone);
         });
     }
 
@@ -905,6 +1029,51 @@ impl Backend {
                 });
             }
             Internal::Jellyfin(result) => self.emit(AppEvent::Jellyfin(result)),
+            Internal::HealthStarted(name) => {
+                if let Some(run) = &mut self.health_run {
+                    run.progress.current = name.display().to_string();
+                    let p = run.progress.clone();
+                    self.emit(AppEvent::HealthProgress(Some(p)));
+                }
+            }
+            Internal::HealthChecked(path, report) => {
+                if let Err(e) = self.db.save_health(&path, &report) {
+                    tracing::warn!("cannot store health check: {e}");
+                }
+                if let Some(run) = &mut self.health_run {
+                    run.progress.done += 1;
+                    let worst = report.findings.iter().map(health::Finding::severity).max();
+                    match worst {
+                        Some(health::Severity::Defect) => run.progress.defect += 1,
+                        Some(health::Severity::Suspect) => run.progress.suspect += 1,
+                        _ => {}
+                    }
+                    run.dirty = true;
+                    let p = run.progress.clone();
+                    self.emit(AppEvent::HealthProgress(Some(p)));
+                }
+                self.health.insert(path, *report);
+            }
+            Internal::HealthDone => {
+                if let Some(run) = self.health_run.take() {
+                    let p = &run.progress;
+                    let text = trf!(
+                        "Check finished: {} of {} files checked – {} defect, {} suspect",
+                        p.done,
+                        p.total,
+                        p.defect,
+                        p.suspect
+                    );
+                    let level = if p.defect > 0 {
+                        NoticeLevel::Warning
+                    } else {
+                        NoticeLevel::Info
+                    };
+                    self.notice(level, text);
+                }
+                self.emit(AppEvent::HealthProgress(None));
+                self.publish_library();
+            }
             Internal::QuickConnect(event) => {
                 if matches!(event, jellyfin::QuickConnectEvent::Done(_)) {
                     self.quick_connect_cancel = None;
@@ -1055,6 +1224,14 @@ impl Backend {
     // ------------------------------------------------------------- scheduler
 
     fn schedule(&mut self) {
+        if let Some(run) = &mut self.health_run
+            && run.dirty
+            && run.published.elapsed() >= Duration::from_secs(3)
+        {
+            run.dirty = false;
+            run.published = std::time::Instant::now();
+            self.publish_library();
+        }
         let max = self.config.resources.max_parallel_jobs.max(1);
         let mut gate = None;
         while !self.queue_paused && self.running.len() < max {

@@ -13,6 +13,7 @@ use crate::analyzer::recommend::{Analysis, Recommendation};
 use crate::encoding::hardware::HardwareCaps;
 use crate::encoding::plan::{PlanBlocker, PlanWarning};
 use crate::encoding::profile::EncodingProfile;
+use crate::health::Health;
 use crate::media::model::MediaFile;
 use crate::monitor::{GateBlock, ResourceSnapshot};
 use crate::provider::jellyfin::{QuickConnectEvent, ServerInfo};
@@ -27,6 +28,7 @@ pub struct LibraryEntry {
     pub top_in_folder: bool,
     pub top_global: bool,
     pub duplicate: bool,
+    pub health: Health,
     /// A job for this file exists in the queue (any state but finished).
     pub queued: bool,
 }
@@ -66,6 +68,13 @@ pub enum Command {
         device_id: String,
     },
     CancelQuickConnect,
+    /// Quick check (stage 2) of these files; `recheck` also repeats files
+    /// whose current version was checked already.
+    CheckHealth {
+        paths: Vec<PathBuf>,
+        recheck: bool,
+    },
+    CancelHealthCheck,
     PreviewJobs {
         paths: Vec<PathBuf>,
         profile_id: String,
@@ -129,4 +138,15 @@ pub enum AppEvent {
     /// Result of [`Command::TestJellyfin`].
     Jellyfin(Result<ServerInfo, String>),
     QuickConnect(QuickConnectEvent),
+    /// Running quick check (`None` = none running).
+    HealthProgress(Option<HealthProgress>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HealthProgress {
+    pub done: usize,
+    pub total: usize,
+    pub defect: usize,
+    pub suspect: usize,
+    pub current: String,
 }

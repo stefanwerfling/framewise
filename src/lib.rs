@@ -8,6 +8,7 @@ pub mod analyzer;
 pub mod core;
 pub mod encoding;
 pub mod gui;
+pub mod health;
 pub mod media;
 pub mod monitor;
 pub mod persistence;

@@ -69,17 +69,7 @@ impl Client {
             .user_agent(concat!("framewise/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| ClientError::new(e.to_string()))?;
-        let device_id = match device_id.trim() {
-            "" => "framewise",
-            id => id,
-        };
-        let mut auth = format!(
-            "MediaBrowser Client=\"framewise\", Device=\"framewise\", DeviceId=\"{device_id}\", Version=\"{}\"",
-            env!("CARGO_PKG_VERSION"),
-        );
-        if !token.trim().is_empty() {
-            auth.push_str(&format!(", Token=\"{}\"", token.trim()));
-        }
+        let auth = authorization(token, device_id);
         Ok(Self {
             http,
             base,
@@ -254,6 +244,22 @@ impl Client {
             .await
             .map_err(|e| ClientError::new(trf!("Unexpected answer from {}: {}", url, e)))
     }
+}
+
+/// Value of the `Authorization` header (`token` may be empty before a login).
+pub fn authorization(token: &str, device_id: &str) -> String {
+    let device_id = match device_id.trim() {
+        "" => "framewise",
+        id => id,
+    };
+    let mut auth = format!(
+        "MediaBrowser Client=\"framewise\", Device=\"framewise\", DeviceId=\"{device_id}\", Version=\"{}\"",
+        env!("CARGO_PKG_VERSION"),
+    );
+    if !token.trim().is_empty() {
+        auth.push_str(&format!(", Token=\"{}\"", token.trim()));
+    }
+    auth
 }
 
 fn request_error(base: &str, e: &reqwest::Error) -> ClientError {

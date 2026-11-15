@@ -10,11 +10,12 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::core::error::{Error, Result};
 use crate::encoding::profile::EncodingProfile;
+use crate::health::CheckReport;
 use crate::media::model::MediaFile;
 use crate::queue::job::{HistoryEntry, Job, JobId};
 use crate::scanner::ScanCache;
 
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 
 #[derive(Clone)]
 pub struct Database {
@@ -71,6 +72,14 @@ impl Database {
                  );",
             )?;
         }
+        if version < 2 {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS health (
+                    path TEXT PRIMARY KEY,
+                    data TEXT NOT NULL
+                 );",
+            )?;
+        }
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -120,6 +129,33 @@ impl Database {
             }
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    // ---- health checks
+
+    /// All stored quick checks by media path (`jellyfin://…` for server items).
+    pub fn load_health(
+        &self,
+    ) -> Result<std::collections::HashMap<std::path::PathBuf, CheckReport>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare("SELECT path, data FROM health")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (path, data) = row?;
+            if let Ok(report) = serde_json::from_str::<CheckReport>(&data) {
+                out.insert(path.into(), report);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn save_health(&self, path: &Path, report: &CheckReport) -> Result<()> {
+        self.lock().execute(
+            "INSERT OR REPLACE INTO health (path, data) VALUES (?1, ?2)",
+            params![path.to_string_lossy(), serde_json::to_string(report)?],
+        )?;
         Ok(())
     }
 

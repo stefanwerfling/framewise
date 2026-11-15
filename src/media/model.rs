@@ -263,6 +263,20 @@ pub struct VideoStream {
     /// encode that keeps HDR (`None` = not read).
     #[serde(default)]
     pub hdr_metadata: Option<HdrMetadata>,
+    /// Nominal and average frame rate differ noticeably (variable frame
+    /// rate, a common cause of audio/video drift on TV players).
+    #[serde(default)]
+    pub variable_frame_rate: bool,
+}
+
+/// Nominal (`r_frame_rate`) and average rate differ by more than 1 %.
+pub fn is_variable_frame_rate(nominal: Option<f64>, average: Option<f64>) -> bool {
+    match (nominal, average) {
+        (Some(n), Some(a)) if n > 0.0 && a > 0.0 && n < 400.0 && a < 400.0 => {
+            (n - a).abs() / n > 0.01
+        }
+        _ => false,
+    }
 }
 
 impl VideoStream {

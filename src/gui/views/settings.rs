@@ -255,6 +255,8 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
             ui.label(RichText::new(tr!("The folder structure of the source is recreated in the target. Originals are never modified; temporary files are only written to the work directory (ideally on the target drive for fast moves).")).small().color(theme::MUTED));
         });
 
+        health_card(ui, &mut s.draft.health);
+
         theme::card().show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(RichText::new(tr!("Interface")).strong());
@@ -619,4 +621,67 @@ fn jellyfin_card(ui: &mut egui::Ui, s: &mut SettingsUi) -> Option<JellyfinAction
         }
     });
     action
+}
+
+/// Playback device (stage 1) and quick check (stage 2).
+fn health_card(ui: &mut egui::Ui, h: &mut crate::core::config::HealthSettings) {
+    theme::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new(tr!("Playback device and health check")).strong());
+        ui.label(
+            RichText::new(tr!("What the TV plays directly. Everything else is converted by the server on the fly – the library marks it as playback risk. The defaults fit Android TV / Fire TV with the Jellyfin app."))
+                .small()
+                .color(theme::MUTED),
+        );
+        egui::Grid::new("health").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+            ui.label(tr!("Video"));
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut h.hevc, "HEVC");
+                ui.checkbox(&mut h.av1, "AV1");
+                ui.checkbox(&mut h.dolby_vision, "Dolby Vision");
+            });
+            ui.end_row();
+            ui.label(tr!("Audio"));
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut h.dts, "DTS");
+                ui.checkbox(&mut h.truehd, "TrueHD");
+            })
+            .response
+            .on_hover_text(tr!("Tick if a receiver decodes it (passthrough) or the app plays it"));
+            ui.end_row();
+            ui.label(tr!("Subtitles"));
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut h.image_subtitles, "PGS / VobSub");
+                ui.checkbox(&mut h.ass_subtitles, "ASS");
+            });
+            ui.end_row();
+            ui.label(tr!("Maximum height"));
+            egui::ComboBox::from_id_salt("max_height")
+                .selected_text(format!("{}p", h.max_height))
+                .show_ui(ui, |ui| {
+                    for v in [720, 1080, 1440, 2160, 4320] {
+                        ui.selectable_value(&mut h.max_height, v, format!("{v}p"));
+                    }
+                });
+            ui.end_row();
+            ui.label(tr!("Maximum bitrate"));
+            ui.add(egui::DragValue::new(&mut h.max_bitrate_mbps).range(0..=400).suffix(" Mbit/s"))
+                .on_hover_text(tr!("0 = no limit. Over Wi-Fi 40–80 Mbit/s are realistic."));
+            ui.end_row();
+            ui.label(tr!("Quick check"));
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut h.samples).range(1..=20));
+                ui.label(tr!("samples of"));
+                ui.add(egui::DragValue::new(&mut h.sample_seconds).range(1..=30).suffix(" s"));
+                ui.label(tr!("· files at once"));
+                ui.add(egui::DragValue::new(&mut h.parallel).range(1..=8));
+            });
+            ui.end_row();
+        });
+        ui.label(
+            RichText::new(tr!("More and longer samples find more but transfer more data: per file roughly samples × length × bitrate."))
+                .small()
+                .color(theme::MUTED),
+        );
+    });
 }

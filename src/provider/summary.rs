@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 
 use crate::analyzer::recommend::Recommendation;
+use crate::health::HealthState;
 use crate::provider::{ItemKind, ProviderInfo};
 
 /// Items per recommendation.
@@ -14,11 +15,19 @@ pub struct Counts {
     pub remux: usize,
     pub optimal: usize,
     pub review: usize,
+    /// Health: defect / suspect (drift, gaps) files.
+    pub defect: usize,
+    pub suspect: usize,
 }
 
 impl Counts {
-    fn add(&mut self, r: Recommendation) {
+    fn add(&mut self, r: Recommendation, health: HealthState) {
         self.total += 1;
+        match health {
+            HealthState::Defect => self.defect += 1,
+            HealthState::Suspect => self.suspect += 1,
+            _ => {}
+        }
         match r {
             Recommendation::Transcode => self.transcode += 1,
             Recommendation::Remux => self.remux += 1,
@@ -57,15 +66,15 @@ pub struct LibrarySummary {
 }
 
 pub fn summarize<'a>(
-    items: impl IntoIterator<Item = (&'a ProviderInfo, Recommendation)>,
+    items: impl IntoIterator<Item = (&'a ProviderInfo, Recommendation, HealthState)>,
 ) -> LibrarySummary {
     let mut summary = LibrarySummary::default();
     let mut series: BTreeMap<(String, String), BTreeMap<(bool, u32), Counts>> = BTreeMap::new();
-    for (info, rec) in items {
+    for (info, rec, health) in items {
         match info.kind {
-            ItemKind::Movie => summary.movies.add(rec),
+            ItemKind::Movie => summary.movies.add(rec, health),
             ItemKind::Episode => {
-                summary.episodes.add(rec);
+                summary.episodes.add(rec, health);
                 let name = info.series.clone().unwrap_or_default();
                 // (no season, number): seasons first, unnumbered last.
                 let key = (info.season.is_none(), info.season.unwrap_or(0));
@@ -74,7 +83,7 @@ pub fn summarize<'a>(
                     .or_default()
                     .entry(key)
                     .or_default()
-                    .add(rec);
+                    .add(rec, health);
             }
         }
     }
@@ -94,6 +103,8 @@ pub fn summarize<'a>(
                 acc.remux += s.counts.remux;
                 acc.optimal += s.counts.optimal;
                 acc.review += s.counts.review;
+                acc.defect += s.counts.defect;
+                acc.suspect += s.counts.suspect;
                 acc
             });
             SeriesSummary {
@@ -142,7 +153,14 @@ mod tests {
             (ep("A-Series", Some(1), 1), Recommendation::Transcode),
             (movie, Recommendation::Transcode),
         ];
-        let s = summarize(items.iter().map(|(i, r)| (i, *r)));
+        let s = summarize(items.iter().enumerate().map(|(n, (i, r))| {
+            let h = if n == 1 {
+                HealthState::Defect
+            } else {
+                HealthState::Ok
+            };
+            (i, *r, h)
+        }));
         assert_eq!(s.movies.total, 1);
         assert_eq!(s.episodes.total, 5);
         assert_eq!(s.episodes.actionable(), 3);
@@ -155,5 +173,7 @@ mod tests {
         assert_eq!(seasons, [Some(1), Some(2), None]);
         assert_eq!(b.seasons[0].counts.remux, 1);
         assert_eq!(b.seasons[2].counts.review, 1);
+        assert_eq!(b.counts.defect, 1);
+        assert_eq!(b.seasons[0].counts.defect, 1);
     }
 }

@@ -98,6 +98,7 @@ pub struct Snapshots {
     pub queue_paused: bool,
     pub gate: Option<GateBlock>,
     pub scan_progress: Option<ScanProgress>,
+    pub health_progress: Option<crate::core::events::HealthProgress>,
     pub scan_summary: Option<ScanSummary>,
 }
 
@@ -262,6 +263,7 @@ impl FramewiseApp {
                 AppEvent::Notice { level, text } => self.notify(level, text),
                 AppEvent::Jellyfin(result) => self.settings_ui.on_jellyfin(result),
                 AppEvent::QuickConnect(event) => self.settings_ui.on_quick_connect(event),
+                AppEvent::HealthProgress(p) => self.snap.health_progress = p,
             }
         }
     }

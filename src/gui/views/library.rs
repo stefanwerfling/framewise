@@ -15,6 +15,7 @@ use crate::core::events::NoticeLevel;
 use crate::core::events::{Command, LibraryEntry};
 use crate::encoding::plan::{AudioAction, SubtitleAction, VideoAction};
 use crate::gui::{FramewiseApp, format, selected_set, theme};
+use crate::health::{HealthState, Severity};
 use crate::media::model::{HdrFormat, SubtitleKind};
 use crate::provider::summary::{self, Counts, LibrarySummary};
 use crate::{tr, trf};
@@ -30,6 +31,15 @@ pub enum SortKey {
     Duration,
     Potential,
     Compatibility,
+    Health,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HealthFilter {
+    All,
+    /// Playback risk, suspect or defect.
+    Problems,
+    Only(HealthState),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -42,6 +52,9 @@ pub enum RecFilter {
 pub struct LibraryUi {
     pub search: String,
     pub rec_filter: RecFilter,
+    pub health_filter: HealthFilter,
+    /// Quick check also repeats files that were checked already.
+    pub recheck: bool,
     pub only_hdr: bool,
     pub only_top: bool,
     pub only_duplicates: bool,
@@ -62,6 +75,8 @@ impl Default for LibraryUi {
         Self {
             search: String::new(),
             rec_filter: RecFilter::All,
+            health_filter: HealthFilter::All,
+            recheck: false,
             only_hdr: false,
             only_top: false,
             only_duplicates: false,
@@ -86,6 +101,7 @@ impl LibraryUi {
         let mut h = DefaultHasher::new();
         self.search.hash(&mut h);
         self.rec_filter.hash(&mut h);
+        self.health_filter.hash(&mut h);
         (
             self.only_hdr,
             self.only_top,
@@ -131,6 +147,11 @@ impl LibraryUi {
                         ),
                         RecFilter::Only(r) => e.analysis.recommendation == r,
                     }
+                    && match self.health_filter {
+                        HealthFilter::All => true,
+                        HealthFilter::Problems => e.health.state().is_problem(),
+                        HealthFilter::Only(s) => e.health.state() == s,
+                    }
                     && (!self.only_hdr || e.media.primary_video().is_some_and(|v| v.hdr.is_hdr()))
                     && (!self.only_top || e.top_in_folder || e.top_global)
                     && (!self.only_duplicates || e.duplicate)
@@ -166,6 +187,11 @@ impl LibraryUi {
                             .cmp(&y.analysis.estimated_savings),
                     ),
                 SortKey::Compatibility => x.analysis.compatibility.cmp(&y.analysis.compatibility),
+                SortKey::Health => x
+                    .health
+                    .state()
+                    .cmp(&y.health.state())
+                    .then(x.health.findings().len().cmp(&y.health.findings().len())),
             };
             if self.descending { ord.reverse() } else { ord }
         });
@@ -196,6 +222,24 @@ fn rec_color(r: Recommendation) -> egui::Color32 {
     }
 }
 
+fn health_color(s: HealthState) -> egui::Color32 {
+    match s {
+        HealthState::Ok => theme::OK,
+        HealthState::Unchecked | HealthState::CheckFailed => theme::MUTED,
+        HealthState::Risk => theme::ACCENT,
+        HealthState::Suspect => theme::WARN,
+        HealthState::Defect => theme::ERROR,
+    }
+}
+
+fn severity_icon(s: Severity) -> (&'static str, egui::Color32) {
+    match s {
+        Severity::Risk => ("ℹ", theme::ACCENT),
+        Severity::Suspect => ("⚠", theme::WARN),
+        Severity::Defect => ("⛔", theme::ERROR),
+    }
+}
+
 fn compat_color(c: Compatibility) -> egui::Color32 {
     match c {
         Compatibility::Compatible => theme::OK,
@@ -222,6 +266,7 @@ fn sort_header(ui: &mut egui::Ui, state: &mut LibraryUi, key: SortKey, label: &s
                 key,
                 SortKey::Size
                     | SortKey::Bitrate
+                    | SortKey::Health
                     | SortKey::Potential
                     | SortKey::Resolution
                     | SortKey::Duration
@@ -274,6 +319,36 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
                     ui.selectable_value(&mut state.rec_filter, RecFilter::Only(r), r.label());
                 }
             });
+        let label = match state.health_filter {
+            HealthFilter::All => tr!("Any health").to_string(),
+            HealthFilter::Problems => tr!("Problems").to_string(),
+            HealthFilter::Only(s) => s.label().to_string(),
+        };
+        egui::ComboBox::from_id_salt("health_filter")
+            .selected_text(label)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut state.health_filter,
+                    HealthFilter::All,
+                    tr!("Any health"),
+                );
+                ui.selectable_value(
+                    &mut state.health_filter,
+                    HealthFilter::Problems,
+                    tr!("Problems"),
+                )
+                .on_hover_text(tr!("Defect, suspect or playback risk"));
+                for s in [
+                    HealthState::Defect,
+                    HealthState::Suspect,
+                    HealthState::Risk,
+                    HealthState::CheckFailed,
+                    HealthState::Unchecked,
+                    HealthState::Ok,
+                ] {
+                    ui.selectable_value(&mut state.health_filter, HealthFilter::Only(s), s.label());
+                }
+            });
         ui.checkbox(&mut state.only_hdr, "HDR");
         ui.checkbox(&mut state.only_top, tr!("Largest per folder"));
         ui.checkbox(&mut state.only_duplicates, tr!("Duplicates"));
@@ -288,6 +363,8 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
     if remote {
         series_overview(app, ui, &lib);
     }
+
+    health_controls(app, ui, &lib, &rows);
 
     // ---- selection / actions
     ui.horizontal_wrapped(|ui| {
@@ -410,6 +487,7 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
             .column(Column::initial(36.0))
             .column(Column::initial(60.0).clip(true))
             .column(Column::initial(90.0))
+            .column(Column::initial(110.0).clip(true))
             .column(Column::remainder().at_least(130.0).clip(true))
             .header(22.0, |mut header| {
                 header.col(|_| {});
@@ -432,6 +510,7 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
                     ui.strong(tr!("Subs"));
                 });
                 header.col(|ui| sort_header(ui, state, SortKey::Compatibility, tr!("Compat.")));
+                header.col(|ui| sort_header(ui, state, SortKey::Health, tr!("Health")));
                 header.col(|ui| {
                     sort_header(
                         ui,
@@ -536,6 +615,34 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
                         ui.label(RichText::new(c.label()).color(compat_color(c)).small());
                     });
                     row.col(|ui| {
+                        let s = e.health.state();
+                        let findings = e.health.findings();
+                        let mut text = s.label().to_string();
+                        if findings.len() > 1 {
+                            text.push_str(&format!(" ({})", findings.len()));
+                        }
+                        let r = ui.label(RichText::new(text).color(health_color(s)).small());
+                        if !findings.is_empty() {
+                            r.on_hover_text(
+                                findings
+                                    .iter()
+                                    .map(|f| {
+                                        format!(
+                                            "{} {}",
+                                            severity_icon(f.severity()).0,
+                                            f.describe()
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n"),
+                            );
+                        } else if s == HealthState::Unchecked {
+                            r.on_hover_text(tr!(
+                                "No playback risk known – quick check not run yet"
+                            ));
+                        }
+                    });
+                    row.col(|ui| {
                         let r = e.analysis.recommendation;
                         ui.label(RichText::new(r.label()).color(rec_color(r)));
                         if let Some(s) = e.analysis.estimated_savings.filter(|s| *s > 0) {
@@ -634,6 +741,8 @@ fn details(ui: &mut egui::Ui, e: &LibraryEntry) {
                 .color(theme::MUTED),
         );
     }
+
+    health_details(ui, e);
 
     if !a.plan.blockers.is_empty() {
         ui.add_space(4.0);
@@ -934,7 +1043,10 @@ fn details(ui: &mut egui::Ui, e: &LibraryEntry) {
 /// Save dialog on its own thread; the CSV is built right away from the
 /// rows shown now and written once a path was chosen.
 fn start_export(app: &mut FramewiseApp, lib: &Arc<Vec<LibraryEntry>>, rows: &[usize]) {
-    let csv = report::to_csv(rows.iter().map(|&i| (&lib[i].media, &lib[i].analysis)));
+    let csv = report::to_csv(
+        rows.iter()
+            .map(|&i| (&lib[i].media, &lib[i].analysis, &lib[i].health)),
+    );
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let path = rfd::FileDialog::new()
@@ -981,11 +1093,17 @@ fn counts_text(c: &Counts) -> String {
     if c.review > 0 {
         text.push_str(&trf!(" · {} to review", c.review));
     }
+    if c.defect > 0 {
+        text.push_str(&trf!(" · {} defect", c.defect));
+    }
+    if c.suspect > 0 {
+        text.push_str(&trf!(" · {} suspect", c.suspect));
+    }
     text
 }
 
 fn counts_color(c: &Counts) -> egui::Color32 {
-    if c.review > 0 {
+    if c.review > 0 || c.defect > 0 {
         theme::ERROR
     } else if c.actionable() > 0 {
         theme::WARN
@@ -1005,7 +1123,7 @@ fn series_overview(app: &mut FramewiseApp, ui: &mut egui::Ui, lib: &Arc<Vec<Libr
                 e.media
                     .provider
                     .as_ref()
-                    .map(|p| (p, e.analysis.recommendation))
+                    .map(|p| (p, e.analysis.recommendation, e.health.state()))
             })));
             app.library_ui.overview = Some((ptr, s.clone()));
             s
@@ -1074,4 +1192,123 @@ fn series_overview(app: &mut FramewiseApp, ui: &mut egui::Ui, lib: &Arc<Vec<Libr
                 });
         });
     ui.separator();
+}
+
+/// Quick check buttons and progress.
+fn health_controls(
+    app: &mut FramewiseApp,
+    ui: &mut egui::Ui,
+    lib: &Arc<Vec<LibraryEntry>>,
+    rows: &[usize],
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(tr!("Quick check")).strong())
+            .on_hover_text(tr!("Reads the header and a few short samples of each file (through the server for Jellyfin) and looks for broken data, audio gaps and audio/video offsets."));
+        if let Some(p) = app.snap.health_progress.clone() {
+            ui.add(
+                egui::ProgressBar::new(p.done as f32 / p.total.max(1) as f32)
+                    .desired_width(220.0)
+                    .text(format!("{} / {}", p.done, p.total)),
+            );
+            ui.label(
+                RichText::new(trf!("{} defect · {} suspect", p.defect, p.suspect)).color(
+                    if p.defect > 0 { theme::ERROR } else { theme::MUTED },
+                ),
+            );
+            if ui.button(tr!("Stop")).on_hover_text(tr!("Results so far are kept; starting again continues with the unchecked files")).clicked() {
+                app.send(Command::CancelHealthCheck);
+            }
+            ui.label(RichText::new(p.current).small().color(theme::MUTED));
+            return;
+        }
+        let shown: Vec<PathBuf> = rows.iter().map(|&i| lib[i].media.absolute_path.clone()).collect();
+        let recheck = app.library_ui.recheck;
+        let todo = |paths: &[PathBuf]| {
+            if recheck {
+                return paths.len();
+            }
+            let want: HashSet<&PathBuf> = paths.iter().collect();
+            lib.iter()
+                .filter(|e| want.contains(&e.media.absolute_path) && !e.health.checked())
+                .count()
+        };
+        let n_shown = todo(&shown);
+        if ui
+            .add_enabled(n_shown > 0, egui::Button::new(trf!("Check shown ({})", n_shown)))
+            .clicked()
+        {
+            app.send(Command::CheckHealth {
+                paths: shown,
+                recheck,
+            });
+        }
+        let selected = selected_set(&app.library_ui.selected);
+        let n_sel = todo(&selected);
+        if ui
+            .add_enabled(n_sel > 0, egui::Button::new(trf!("Check selected ({})", n_sel)))
+            .clicked()
+        {
+            app.send(Command::CheckHealth {
+                paths: selected,
+                recheck,
+            });
+        }
+        ui.checkbox(&mut app.library_ui.recheck, tr!("check again"))
+            .on_hover_text(tr!("Also check files that were checked already"));
+    });
+}
+
+fn health_details(ui: &mut egui::Ui, e: &LibraryEntry) {
+    let h = &e.health;
+    let state = h.state();
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(tr!("Health")).strong());
+        ui.label(RichText::new(state.label()).color(health_color(state)));
+        match &h.check {
+            Some(c) if c.failed.is_none() => {
+                ui.label(
+                    RichText::new(trf!(
+                        "checked {} · {} samples",
+                        format::timestamp(c.checked_unix),
+                        c.samples
+                    ))
+                    .small()
+                    .color(theme::MUTED),
+                );
+            }
+            Some(c) => {
+                ui.label(
+                    RichText::new(trf!(
+                        "check failed: {}",
+                        c.failed.as_deref().unwrap_or_default()
+                    ))
+                    .small()
+                    .color(theme::WARN),
+                );
+            }
+            None => {
+                ui.label(
+                    RichText::new(tr!("quick check not run yet"))
+                        .small()
+                        .color(theme::MUTED),
+                );
+            }
+        }
+    });
+    for f in h.findings() {
+        let (icon, color) = severity_icon(f.severity());
+        ui.label(
+            RichText::new(format!("{icon} {}", f.describe()))
+                .color(color)
+                .small(),
+        );
+    }
+    if !h.risks.is_empty() {
+        ui.label(
+            RichText::new(tr!("ℹ = the TV probably cannot play this directly; the server converts on the fly, which can stall on weak servers or Wi-Fi. Adjust the device in the settings."))
+                .small()
+                .color(theme::MUTED),
+        );
+    }
 }

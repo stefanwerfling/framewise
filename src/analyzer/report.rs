@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 
 use crate::analyzer::recommend::Analysis;
 use crate::encoding::plan::{AudioAction, AudioPurpose, SubtitleAction};
+use crate::health::Health;
 use crate::media::model::MediaFile;
 use crate::provider::ItemKind;
 use crate::{tr, trf};
@@ -60,7 +61,9 @@ pub fn reasons(media: &MediaFile, analysis: &Analysis) -> Vec<String> {
 /// CSV for spreadsheets: `;`-separated with UTF-8 BOM, so Excel and
 /// LibreOffice open it with umlauts intact in German locales. Sizes are
 /// plain byte counts so they sort and sum correctly.
-pub fn to_csv<'a>(rows: impl IntoIterator<Item = (&'a MediaFile, &'a Analysis)>) -> String {
+pub fn to_csv<'a>(
+    rows: impl IntoIterator<Item = (&'a MediaFile, &'a Analysis, &'a Health)>,
+) -> String {
     let mut out = String::from("\u{feff}");
     let header = [
         tr!("Type"),
@@ -79,9 +82,11 @@ pub fn to_csv<'a>(rows: impl IntoIterator<Item = (&'a MediaFile, &'a Analysis)>)
         tr!("Audio"),
         tr!("Size (bytes)"),
         tr!("Estimated savings (bytes)"),
+        tr!("Health"),
+        tr!("Findings"),
     ];
     line(&mut out, header.iter().map(|h| h.to_string()));
-    for (m, a) in rows {
+    for (m, a, h) in rows {
         let v = m.primary_video();
         let p = m.provider.as_ref();
         let opt = |x: Option<String>| x.unwrap_or_default();
@@ -124,6 +129,12 @@ pub fn to_csv<'a>(rows: impl IntoIterator<Item = (&'a MediaFile, &'a Analysis)>)
                 audio.join(" | "),
                 m.size_bytes.to_string(),
                 opt(a.estimated_savings.map(|s| s.to_string())),
+                h.state().label().to_string(),
+                h.findings()
+                    .iter()
+                    .map(|f| f.describe())
+                    .collect::<Vec<_>>()
+                    .join(", "),
             ],
         );
     }
@@ -191,11 +202,17 @@ mod tests {
         assert!(why.iter().any(|r| r.contains("MPEG-2")), "{why:?}");
         assert!(why.iter().any(|r| r.contains("MKV")), "{why:?}");
 
-        let csv = to_csv([(&local, &a1), (&episode, &a2)]);
+        let healthy = Health::default();
+        let broken = Health {
+            risks: vec![crate::health::Finding::Interlaced],
+            check: None,
+        };
+        let csv = to_csv([(&local, &a1, &healthy), (&episode, &a2, &broken)]);
         assert!(csv.starts_with('\u{feff}'));
         let lines: Vec<&str> = csv.trim_start_matches('\u{feff}').split("\r\n").collect();
         assert_eq!(lines.len(), 4, "header, two rows, trailing empty");
-        assert_eq!(lines[0].split(';').count(), 16);
+        assert_eq!(lines[0].split(';').count(), 18);
+        assert!(lines[2].contains("interlaced"), "{}", lines[2]);
         assert!(
             lines[1].contains("\"A; \"\"quoted\"\" name.mkv\""),
             "{}",

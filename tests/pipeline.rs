@@ -771,3 +771,168 @@ async fn hdr10_is_kept_in_10_bit_with_metadata() {
     assert_eq!(meta.mastering.unwrap().x265(), MASTER_DISPLAY);
     assert_eq!(meta.max_cll, Some((1000, 400)));
 }
+
+#[tokio::test]
+async fn health_check_finds_broken_data_and_audio_offset() {
+    use framewise::health::Finding;
+    use framewise::health::check::{self, CheckOptions, Input};
+    if !have_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let options = CheckOptions {
+        samples: 4,
+        sample_seconds: 3,
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let run = |path: PathBuf| {
+        let cancel = cancel.clone();
+        async move {
+            check::run(
+                Path::new("ffprobe"),
+                &Input::File(path),
+                String::new(),
+                options,
+                &cancel,
+            )
+            .await
+            .expect("not cancelled")
+        }
+    };
+
+    // Clean file: nothing to report.
+    let clean = dir.path().join("clean.ts");
+    ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=640x360:rate=25:duration=20",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:duration=20",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-g",
+        "25",
+        "-c:a",
+        "aac",
+        clean.to_str().unwrap(),
+    ]);
+    let report = run(clean.clone()).await;
+    assert_eq!(report.failed, None);
+    assert_eq!(report.samples, 4);
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+
+    // Cover art (timestamp 0) must not disturb the samples.
+    let cover = dir.path().join("cover.png");
+    ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "color=red:s=64x64",
+        "-frames:v",
+        "1",
+        cover.to_str().unwrap(),
+    ]);
+    let with_cover = dir.path().join("cover.mp4");
+    ffmpeg(&[
+        "-i",
+        clean.to_str().unwrap(),
+        "-i",
+        cover.to_str().unwrap(),
+        "-map",
+        "0",
+        "-map",
+        "1",
+        "-c",
+        "copy",
+        "-c:v:1",
+        "png",
+        "-disposition:v:1",
+        "attached_pic",
+        "-movflags",
+        "+faststart",
+        with_cover.to_str().unwrap(),
+    ]);
+    let report = run(with_cover).await;
+    assert_eq!(report.samples, 4);
+    assert!(
+        report.findings.is_empty(),
+        "cover art: {:?}",
+        report.findings
+    );
+
+    // ffmpeg's default: MP4 index after the media data.
+    let index_at_end = dir.path().join("index_at_end.mp4");
+    ffmpeg(&[
+        "-i",
+        clean.to_str().unwrap(),
+        "-c",
+        "copy",
+        index_at_end.to_str().unwrap(),
+    ]);
+    let report = run(index_at_end).await;
+    assert!(
+        matches!(report.findings[..], [Finding::IndexAtEnd(bytes)] if bytes > 1000),
+        "{:?}",
+        report.findings
+    );
+
+    // Overwrite a stretch in the middle with garbage.
+    let broken = dir.path().join("broken.ts");
+    let mut data = std::fs::read(&clean).unwrap();
+    let len = data.len();
+    let mut x: u32 = 12345;
+    for b in &mut data[len / 4..len * 3 / 4] {
+        x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+        *b = (x >> 16) as u8;
+    }
+    std::fs::write(&broken, data).unwrap();
+    let report = run(broken).await;
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| matches!(f, Finding::DecodeErrors { .. })),
+        "{:?}",
+        report.findings
+    );
+
+    // Audio starts 0.6 s after the picture.
+    let offset = dir.path().join("offset.mkv");
+    ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=320x180:rate=25:duration=12",
+        "-itsoffset",
+        "0.6",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=duration=12",
+        "-map",
+        "0:v",
+        "-map",
+        "1:a",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-c:a",
+        "aac",
+        offset.to_str().unwrap(),
+    ]);
+    let report = run(offset).await;
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| matches!(f, Finding::AudioOffset(ms) if (550..=650).contains(ms))),
+        "{:?}",
+        report.findings
+    );
+}

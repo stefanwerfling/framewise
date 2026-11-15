@@ -411,3 +411,23 @@ statt fest im Profil zu stehen.
   Episoden), Bewertung gegen das Profil, HTTP-Stub für Seitenabruf, Bibliotheksauswahl,
   ältere Server, 401, nicht erreichbarer Server und Abbruch, Quick-Connect-Anmeldung und
   -Abbruch, Lesen als Benutzer ohne Adminrechte, Serienübersicht, CSV.
+
+### Phase 14 – Defekte Dateien finden
+- **Spalte „Zustand“** in der Bibliothek (OK, ungeprüft, Abspielrisiko, Verdacht, defekt,
+  Prüfung fehlgeschlagen) mit Filter, Sortierung, Befunden im Tooltip, in den Details und
+  im CSV-Export; die Serienübersicht zählt defekte und verdächtige Einträge.
+- **Abspielrisiko** ohne Downloads aus den Scan-Daten, passend zum Abspielgerät
+  (Einstellungen → „Abspielgerät und Zustandsprüfung“; Standard Android TV / Fire TV):
+  was der Server live umwandeln müsste und variable Bildrate.
+- **Schnellprüfung** per Knopf für angezeigte oder ausgewählte Einträge: Kopf und
+  Stichproben mit ffprobe – Dekodierfehler mit Zeitangabe, Tonversatz, unterschiedlich
+  lange Spuren, Ton-/Bildlücken, rückwärts springende Zeitstempel. Funktioniert lokal und
+  über die Jellyfin-API (nur Kopf und Stichproben werden übertragen). Abbrechbar,
+  parallel, Ergebnisse werden gespeichert und erst nach einer Dateiänderung neu geprüft.
+  - Erkennt MP4-Dateien mit **Inhaltsverzeichnis am Ende** (`moov` hinter `mdat`, ffmpeg
+    ohne `-movflags +faststart`) – langsamer Start, Player brechen teils ab.
+  - Die erste Stichprobe liegt immer bei 0:00.
+- Datenbank-Schema 2 (Tabelle `health`); `VideoStream.variable_frame_rate`.
+- Neue Tests: Risikoregeln, Zustandsbewertung, Kopf-/Stichproben-Auswertung, sowie mit
+  echtem ffmpeg: saubere Datei, Datei mit Cover-Bild, absichtlich zerstörte Datei,
+  0,6 s Tonversatz.

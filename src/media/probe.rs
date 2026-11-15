@@ -341,6 +341,16 @@ fn map_video(
         attached_pic: s.flag("attached_pic"),
         crop: None,
         hdr_metadata: None,
+        variable_frame_rate: crate::media::model::is_variable_frame_rate(
+            s.r_frame_rate
+                .as_deref()
+                .and_then(Ratio::parse)
+                .map(Ratio::as_f64),
+            s.avg_frame_rate
+                .as_deref()
+                .and_then(Ratio::parse)
+                .map(Ratio::as_f64),
+        ),
     }
 }
 
