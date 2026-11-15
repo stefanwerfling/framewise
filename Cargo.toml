@@ -7,7 +7,7 @@ description = "Media Optimizer – analysiert und optimiert Video-Sammlungen fü
 license = "MIT"
 
 [dependencies]
-eframe = { version = "0.37", default-features = false, features = ["default_fonts", "system_fonts", "glow", "wayland", "x11"] }
+eframe = { version = "0.37", default-features = false, features = ["clipboard", "default_fonts", "system_fonts", "glow", "wayland", "x11"] }
 egui_extras = "0.37"
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "process", "sync", "time", "io-util", "fs"] }
 serde = { version = "1", features = ["derive"] }

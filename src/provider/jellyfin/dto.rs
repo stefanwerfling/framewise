@@ -42,7 +42,26 @@ pub struct UserPolicy {
 #[serde(rename_all = "PascalCase", default)]
 pub struct User {
     pub id: Option<String>,
+    pub name: Option<String>,
     pub policy: Option<UserPolicy>,
+}
+
+/// Answer of `/QuickConnect/Initiate` and `/QuickConnect/Connect`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "PascalCase", default)]
+pub struct QuickConnectResult {
+    #[serde(deserialize_with = "nullable")]
+    pub authenticated: bool,
+    pub secret: Option<String>,
+    pub code: Option<String>,
+}
+
+/// Answer of `/Users/AuthenticateWithQuickConnect`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "PascalCase", default)]
+pub struct AuthenticationResult {
+    pub user: Option<User>,
+    pub access_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -57,6 +76,8 @@ pub struct ItemsResult {
 #[serde(rename_all = "PascalCase", default)]
 pub struct BaseItem {
     pub id: Option<String>,
+    /// Only set on library views (`/Users/{id}/Views`).
+    pub collection_type: Option<String>,
     pub server_id: Option<String>,
     pub name: Option<String>,
     #[serde(rename = "Type")]

@@ -15,7 +15,7 @@ use crate::encoding::plan::{PlanBlocker, PlanWarning};
 use crate::encoding::profile::EncodingProfile;
 use crate::media::model::MediaFile;
 use crate::monitor::{GateBlock, ResourceSnapshot};
-use crate::provider::jellyfin::ServerInfo;
+use crate::provider::jellyfin::{QuickConnectEvent, ServerInfo};
 use crate::queue::job::{HistoryEntry, Job, JobId};
 use crate::scanner::{DuplicateGroup, ScanIssue, ScanProgress};
 
@@ -60,6 +60,12 @@ pub enum Command {
     RescanHardware,
     /// Check the connection and list the libraries (answer: [`AppEvent::Jellyfin`]).
     TestJellyfin(JellyfinSettings),
+    /// Log in with Quick Connect (answers: [`AppEvent::QuickConnect`]).
+    QuickConnect {
+        url: String,
+        device_id: String,
+    },
+    CancelQuickConnect,
     PreviewJobs {
         paths: Vec<PathBuf>,
         profile_id: String,
@@ -122,4 +128,5 @@ pub enum AppEvent {
     },
     /// Result of [`Command::TestJellyfin`].
     Jellyfin(Result<ServerInfo, String>),
+    QuickConnect(QuickConnectEvent),
 }

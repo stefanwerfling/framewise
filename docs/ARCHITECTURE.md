@@ -213,7 +213,17 @@ und liefert nur einen Bericht:
    Serie → Staffel und bietet CSV-Export (auch für lokale Quellen). Die
    Warteschlange nimmt nur lokale Dateien an.
 
-Der API-Schlüssel steht in der Konfigurationsdatei; sie wird mit `0600`
+Anmeldung entweder mit API-Schlüssel oder per **Quick Connect**:
+`/QuickConnect/Initiate` liefert Code und Secret, framewise fragt alle 2 s
+`/QuickConnect/Connect` ab (max. 10 min, abbrechbar) und tauscht das Secret
+über `/Users/AuthenticateWithQuickConnect` gegen ein Zugriffstoken. Das Token
+ist an eine pro Installation erzeugte `device_id` gebunden und wird wie ein
+API-Schlüssel gesendet; zusätzlich werden Benutzer-Id und -Name gespeichert.
+Ohne Administratorrechte schlägt `/Library/VirtualFolders` fehl (403) – dann
+liest framewise `/Users/{id}/Views` (ohne Ordnerpfade, `relative_path` fällt
+auf Bibliothek/Datei bzw. Serie/Staffel/Datei zurück).
+
+Schlüssel bzw. Token stehen in der Konfigurationsdatei; sie wird mit `0600`
 geschrieben.
 
 ### Encoding Queue

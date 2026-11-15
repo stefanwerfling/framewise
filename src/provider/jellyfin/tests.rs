@@ -290,6 +290,11 @@ struct Stub {
     movies: usize,
     /// `/Items` without user answers 400 (servers before 10.9).
     legacy: bool,
+    /// The token belongs to a user without administrator rights.
+    viewer_only: bool,
+    /// Quick Connect: polls until the code counts as confirmed.
+    confirm_after: usize,
+    qc_polls: AtomicUsize,
     requests: Mutex<Vec<String>>,
     item_pages: AtomicUsize,
 }
@@ -317,13 +322,44 @@ fn query(target: &str) -> HashMap<String, String> {
 }
 
 impl Stub {
-    fn answer(&self, target: &str, authorized: bool) -> (u16, Value) {
+    fn answer(&self, method: &str, target: &str, authorized: bool, body: &str) -> (u16, Value) {
+        let path = target.split('?').next().unwrap_or_default();
+        let q = query(target);
+        match (method, path) {
+            ("GET", "/QuickConnect/Enabled") => return (200, json!(true)),
+            ("POST", "/QuickConnect/Initiate") => {
+                return (
+                    200,
+                    json!({"Secret": "s3", "Code": "123456", "Authenticated": false}),
+                );
+            }
+            ("GET", "/QuickConnect/Connect") => {
+                assert_eq!(q.get("Secret").map(String::as_str), Some("s3"));
+                let n = self.qc_polls.fetch_add(1, Ordering::Relaxed) + 1;
+                return (200, json!({"Authenticated": n >= self.confirm_after}));
+            }
+            ("POST", "/Users/AuthenticateWithQuickConnect") => {
+                assert!(body.contains("\"Secret\":\"s3\""), "{body}");
+                return (
+                    200,
+                    json!({"AccessToken": "secret",
+                           "User": {"Id": "viewer", "Name": "Anna"}}),
+                );
+            }
+            _ => {}
+        }
         if !authorized {
             return (401, json!({}));
         }
-        let path = target.split('?').next().unwrap_or_default();
-        let q = query(target);
         match path {
+            "/Library/VirtualFolders" if self.viewer_only => (403, json!({})),
+            "/Users/viewer/Views" => (
+                200,
+                json!({"Items": [
+                    {"Name": "Filme", "Id": "lib-m", "CollectionType": "movies"},
+                    {"Name": "Musik", "Id": "lib-music", "CollectionType": "music"}
+                ], "TotalRecordCount": 2}),
+            ),
             "/System/Info" => (
                 200,
                 json!({"ServerName": "Stub", "Version": "10.10.7", "Id": "srv"}),
@@ -388,18 +424,32 @@ async fn serve(stub: Arc<Stub>) -> String {
                         Ok(n) => buf.extend_from_slice(&chunk[..n]),
                     }
                 }
-                let head = String::from_utf8_lossy(&buf).into_owned();
-                let target = head
-                    .split_whitespace()
-                    .nth(1)
-                    .unwrap_or_default()
-                    .to_string();
+                let end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+                let head = String::from_utf8_lossy(&buf[..end]).into_owned();
+                let length: usize = head
+                    .lines()
+                    .find_map(|l| {
+                        let (k, v) = l.split_once(':')?;
+                        k.eq_ignore_ascii_case("content-length")
+                            .then(|| v.trim().parse().ok())?
+                    })
+                    .unwrap_or(0);
+                while buf.len() < end + length {
+                    match sock.read(&mut chunk).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let body = String::from_utf8_lossy(&buf[end..]).into_owned();
+                let mut words = head.split_whitespace();
+                let method = words.next().unwrap_or_default().to_string();
+                let target = words.next().unwrap_or_default().to_string();
                 let authorized = head.lines().any(|l| {
                     l.to_ascii_lowercase().starts_with("authorization:")
                         && l.contains("Token=\"secret\"")
                 });
                 stub.requests.lock().unwrap().push(target.clone());
-                let (status, body) = stub.answer(&target, authorized);
+                let (status, body) = stub.answer(&method, &target, authorized, &body);
                 let body = body.to_string();
                 let response = format!(
                     "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -417,6 +467,7 @@ fn settings(url: &str, key: &str) -> JellyfinSettings {
         url: url.into(),
         api_key: key.into(),
         libraries: vec![],
+        ..JellyfinSettings::default()
     }
 }
 
@@ -525,4 +576,86 @@ async fn cancel_stops_before_the_next_page() {
     assert!(outcome.cancelled);
     assert!(outcome.files.is_empty());
     assert_eq!(stub.item_pages.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn quick_connect_logs_in_and_reads_the_users_libraries() {
+    let stub = Arc::new(Stub {
+        movies: 5,
+        viewer_only: true,
+        confirm_after: 3,
+        ..Stub::default()
+    });
+    let url = serve(stub.clone()).await;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let e = events.clone();
+    quick_connect(
+        &url,
+        "framewise-test",
+        std::time::Duration::from_millis(5),
+        Arc::new(AtomicBool::new(false)),
+        move |ev| e.lock().unwrap().push(ev),
+    )
+    .await;
+    let events = events.lock().unwrap().clone();
+    assert_eq!(events[0], QuickConnectEvent::Code("123456".into()));
+    let QuickConnectEvent::Done(Ok(login)) = &events[1] else {
+        panic!("{events:?}");
+    };
+    assert_eq!(login.token, "secret");
+    assert_eq!(login.user_id, "viewer");
+    assert_eq!(login.user_name, "Anna");
+    assert_eq!(stub.qc_polls.load(Ordering::Relaxed), 3);
+
+    let settings = JellyfinSettings {
+        url: url.clone(),
+        api_key: login.token.clone(),
+        user_id: login.user_id.clone(),
+        user_name: login.user_name.clone(),
+        device_id: "framewise-test".into(),
+        libraries: vec![],
+    };
+    let info = connect(&settings).await.expect("connect as user");
+    let names: Vec<&str> = info.libraries.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(names, ["Filme", "Musik"]);
+    let outcome = scan(&settings, Arc::new(AtomicBool::new(false)), |_| {})
+        .await
+        .expect("scan");
+    assert_eq!(outcome.files.len(), 5);
+    assert_eq!(
+        outcome.files[0].relative_path,
+        std::path::PathBuf::from("Filme/Movie 000.mkv"),
+        "no folders without administrator rights"
+    );
+}
+
+#[tokio::test]
+async fn quick_connect_can_be_cancelled() {
+    let stub = Arc::new(Stub {
+        confirm_after: usize::MAX,
+        ..Stub::default()
+    });
+    let url = serve(stub.clone()).await;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let e = events.clone();
+    let c = cancel.clone();
+    quick_connect(
+        &url,
+        "",
+        std::time::Duration::from_millis(5),
+        cancel,
+        move |ev| {
+            if matches!(ev, QuickConnectEvent::Code(_)) {
+                c.store(true, Ordering::Relaxed);
+            }
+            e.lock().unwrap().push(ev);
+        },
+    )
+    .await;
+    let events = events.lock().unwrap();
+    assert!(matches!(
+        events.last(),
+        Some(QuickConnectEvent::Done(Err(_)))
+    ));
 }

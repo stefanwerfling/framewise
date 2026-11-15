@@ -261,6 +261,7 @@ impl FramewiseApp {
                 }
                 AppEvent::Notice { level, text } => self.notify(level, text),
                 AppEvent::Jellyfin(result) => self.settings_ui.on_jellyfin(result),
+                AppEvent::QuickConnect(event) => self.settings_ui.on_quick_connect(event),
             }
         }
     }

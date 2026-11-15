@@ -392,6 +392,9 @@ statt fest im Profil zu stehen.
     (Dolby Vision mit Profil und Basisschicht, HDR10+, HLG, Atmos/DTS:X über das Profil).
   - Mehrere Versionen eines Films werden einzeln bewertet; fehlende Episoden übersprungen;
     noch nicht analysierte Dateien erscheinen unter „Prüfen“.
+  - Anmeldung mit API-Schlüssel oder **Quick Connect** (Code in Jellyfin bestätigen,
+    abbrechbar, Abmelden). Ohne Administratorrechte werden die eigenen Bibliotheken des
+    Benutzers gelesen.
   - Klare Fehlermeldungen für falsche Adresse, abgelehnten Schlüssel (401/403),
     Zeitüberschreitung und TLS-Probleme.
 - **Bibliothek:** Titel statt Dateiname bei Server-Einträgen, aufklappbare Übersicht
@@ -406,4 +409,5 @@ statt fest im Profil zu stehen.
 - Neue Tests: Abbildung realistischer Jellyfin-Antworten (DV P8/P5, HLG ohne Transfer,
   Atmos, PGS, externe und erzwungene Untertitel, `null`-Felder, Versionen, virtuelle
   Episoden), Bewertung gegen das Profil, HTTP-Stub für Seitenabruf, Bibliotheksauswahl,
-  ältere Server, 401, nicht erreichbarer Server und Abbruch, Serienübersicht, CSV.
+  ältere Server, 401, nicht erreichbarer Server und Abbruch, Quick-Connect-Anmeldung und
+  -Abbruch, Lesen als Benutzer ohne Adminrechte, Serienübersicht, CSV.

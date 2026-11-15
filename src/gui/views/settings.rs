@@ -10,7 +10,7 @@ use crate::core::events::Command;
 use crate::core::paths::{self, ConflictStrategy};
 use crate::gui::{FramewiseApp, theme};
 use crate::i18n::Language;
-use crate::provider::jellyfin::{self, ServerInfo};
+use crate::provider::jellyfin::{self, QuickConnectEvent, ServerInfo};
 use crate::{tr, trf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +31,25 @@ pub struct SettingsUi {
     jellyfin: Option<Result<ServerInfo, String>>,
     jellyfin_testing: bool,
     show_api_key: bool,
+    quick_connect: QuickConnectUi,
+    /// Test the connection on the next frame (after a login).
+    test_pending: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+enum QuickConnectUi {
+    #[default]
+    Idle,
+    Starting,
+    Code(String),
+    Failed(String),
+}
+
+/// What the Jellyfin card asks the backend to do.
+enum JellyfinAction {
+    Test,
+    QuickConnect,
+    CancelQuickConnect,
 }
 
 impl SettingsUi {
@@ -42,6 +61,31 @@ impl SettingsUi {
             jellyfin: None,
             jellyfin_testing: false,
             show_api_key: false,
+            quick_connect: QuickConnectUi::Idle,
+            test_pending: false,
+        }
+    }
+
+    pub fn on_quick_connect(&mut self, event: QuickConnectEvent) {
+        match event {
+            QuickConnectEvent::Code(code) => self.quick_connect = QuickConnectUi::Code(code),
+            QuickConnectEvent::Done(Ok(login)) => {
+                self.quick_connect = QuickConnectUi::Idle;
+                let j = &mut self.draft.jellyfin;
+                j.api_key = login.token;
+                j.user_id = login.user_id;
+                j.user_name = login.user_name;
+                self.show_api_key = false;
+                self.test_pending = true;
+            }
+            QuickConnectEvent::Done(Err(e)) => {
+                // A cancel the user asked for needs no message.
+                self.quick_connect = if self.quick_connect == QuickConnectUi::Idle {
+                    QuickConnectUi::Idle
+                } else {
+                    QuickConnectUi::Failed(e)
+                };
+            }
         }
     }
 
@@ -163,7 +207,7 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
     ui.separator();
 
     let mut pick: Option<(PathField, Option<PathBuf>)> = None;
-    let mut test_jellyfin = false;
+    let mut jellyfin_action = None;
     egui::ScrollArea::vertical().show(ui, |ui| {
         theme::card().show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -178,8 +222,8 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
             }
         });
 
-        if s.draft.source == SourceKind::Jellyfin && jellyfin_card(ui, s) {
-            test_jellyfin = true;
+        if s.draft.source == SourceKind::Jellyfin {
+            jellyfin_action = jellyfin_card(ui, s);
         }
 
         theme::card().show(ui, |ui| {
@@ -384,11 +428,31 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
     if let Some((field, start)) = pick {
         s.pick(field, start);
     }
-    let test = test_jellyfin.then(|| {
-        s.jellyfin_testing = true;
-        s.jellyfin = None;
-        s.draft.jellyfin.clone()
-    });
+    if std::mem::take(&mut s.test_pending) && s.draft.jellyfin.is_configured() {
+        jellyfin_action = Some(JellyfinAction::Test);
+    }
+    let command = match jellyfin_action {
+        Some(JellyfinAction::Test) => {
+            s.jellyfin_testing = true;
+            s.jellyfin = None;
+            Some(Command::TestJellyfin(s.draft.jellyfin.clone()))
+        }
+        Some(JellyfinAction::QuickConnect) => {
+            s.quick_connect = QuickConnectUi::Starting;
+            if s.draft.jellyfin.device_id.is_empty() {
+                s.draft.jellyfin.device_id = jellyfin::new_device_id();
+            }
+            Some(Command::QuickConnect {
+                url: s.draft.jellyfin.url.clone(),
+                device_id: s.draft.jellyfin.device_id.clone(),
+            })
+        }
+        Some(JellyfinAction::CancelQuickConnect) => {
+            s.quick_connect = QuickConnectUi::Idle;
+            Some(Command::CancelQuickConnect)
+        }
+        None => None,
+    };
     if revert {
         s.draft = current;
     } else if save {
@@ -396,15 +460,14 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
         cfg.encoding.active_profile = app.snap.config.encoding.active_profile.clone();
         app.update_config(|c| *c = cfg);
     }
-    if let Some(settings) = test {
-        app.send(Command::TestJellyfin(settings));
+    if let Some(command) = command {
+        app.send(command);
     }
 }
 
-/// Server address, API key, connection test and library choice.
-/// Returns `true` if a connection test was requested.
-fn jellyfin_card(ui: &mut egui::Ui, s: &mut SettingsUi) -> bool {
-    let mut test = false;
+/// Server address, login, connection test and library choice.
+fn jellyfin_card(ui: &mut egui::Ui, s: &mut SettingsUi) -> Option<JellyfinAction> {
+    let mut action = None;
     theme::card().show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.label(RichText::new("Jellyfin").strong());
@@ -417,19 +480,75 @@ fn jellyfin_card(ui: &mut egui::Ui, s: &mut SettingsUi) -> bool {
                     .desired_width(420.0),
             );
             ui.end_row();
-            ui.label(tr!("API key"));
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut j.api_key)
-                        .password(!s.show_api_key)
-                        .desired_width(320.0),
-                );
-                ui.checkbox(&mut s.show_api_key, tr!("show"));
+            ui.label(tr!("Login"));
+            ui.vertical(|ui| {
+                if j.user_id.is_empty() {
+                    ui.horizontal(|ui| {
+                        let edit = ui.add(
+                            egui::TextEdit::singleline(&mut j.api_key)
+                                .password(!s.show_api_key)
+                                .hint_text(tr!("API key"))
+                                .desired_width(320.0),
+                        );
+                        if edit.changed() {
+                            s.jellyfin = None;
+                        }
+                        ui.checkbox(&mut s.show_api_key, tr!("show"));
+                    });
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(trf!("✔ Logged in as {} (Quick Connect)", j.user_name))
+                                .color(theme::OK),
+                        );
+                        if ui.small_button(tr!("Log out")).clicked() {
+                            j.api_key.clear();
+                            j.user_id.clear();
+                            j.user_name.clear();
+                            s.jellyfin = None;
+                        }
+                    });
+                }
+                ui.horizontal(|ui| match &s.quick_connect {
+                    QuickConnectUi::Idle | QuickConnectUi::Failed(_) => {
+                        let ready = !j.url.trim().is_empty();
+                        if ui
+                            .add_enabled(ready, egui::Button::new(tr!("Log in with Quick Connect")))
+                            .on_disabled_hover_text(tr!("Enter the server address first"))
+                            .clicked()
+                        {
+                            action = Some(JellyfinAction::QuickConnect);
+                        }
+                        if let QuickConnectUi::Failed(e) = &s.quick_connect {
+                            ui.label(RichText::new(format!("✖ {e}")).color(theme::ERROR));
+                        }
+                    }
+                    QuickConnectUi::Starting => {
+                        ui.spinner();
+                        ui.label(tr!("Requesting a code …"));
+                        if ui.small_button(tr!("Cancel")).clicked() {
+                            action = Some(JellyfinAction::CancelQuickConnect);
+                        }
+                    }
+                    QuickConnectUi::Code(code) => {
+                        ui.label(RichText::new(code).monospace().size(22.0).strong());
+                        ui.spinner();
+                        if ui.small_button(tr!("Cancel")).clicked() {
+                            action = Some(JellyfinAction::CancelQuickConnect);
+                        }
+                    }
+                });
+                if let QuickConnectUi::Code(_) = &s.quick_connect {
+                    ui.label(
+                        RichText::new(tr!("Enter this code in Jellyfin: user menu → Quick Connect (on any device where you are logged in)."))
+                            .small(),
+                    );
+                }
             });
             ui.end_row();
         });
         ui.label(
-            RichText::new(tr!("Create a key in Jellyfin under Dashboard → API keys. It is stored in the configuration file, readable only by your user."))
+            RichText::new(tr!("Use an API key (Dashboard → API keys) or log in with Quick Connect. Without administrator rights only your own libraries are listed. Key and login are stored in the configuration file, readable only by your user."))
                 .small()
                 .color(theme::MUTED),
         );
@@ -439,7 +558,7 @@ fn jellyfin_card(ui: &mut egui::Ui, s: &mut SettingsUi) -> bool {
                 .add_enabled(ready, egui::Button::new(tr!("Test connection")))
                 .clicked()
             {
-                test = true;
+                action = Some(JellyfinAction::Test);
             }
             if s.jellyfin_testing {
                 ui.spinner();
@@ -499,5 +618,5 @@ fn jellyfin_card(ui: &mut egui::Ui, s: &mut SettingsUi) -> bool {
             j.libraries.clear();
         }
     });
-    test
+    action
 }

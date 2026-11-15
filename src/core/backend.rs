@@ -72,6 +72,7 @@ enum Internal {
     ScanDone(PathBuf, ScanOutcome),
     ScanFailed(String),
     Jellyfin(std::result::Result<jellyfin::ServerInfo, String>),
+    QuickConnect(jellyfin::QuickConnectEvent),
     Job(JobId, RunnerEvent),
     JobDone(JobId, RunOutcome),
 }
@@ -95,6 +96,7 @@ struct Backend {
     gate: Option<GateBlock>,
     snapshot: ResourceSnapshot,
     scan_cancel: Option<Arc<AtomicBool>>,
+    quick_connect_cancel: Option<Arc<AtomicBool>>,
     /// Size-estimate correction from finished jobs.
     calibration: SizeCalibration,
 }
@@ -184,6 +186,7 @@ impl Backend {
             gate: None,
             snapshot: ResourceSnapshot::default(),
             scan_cancel: None,
+            quick_connect_cancel: None,
             calibration: SizeCalibration::default(),
         }
     }
@@ -458,6 +461,12 @@ impl Backend {
             }
             Command::RescanHardware => self.detect_tools(),
             Command::TestJellyfin(settings) => self.test_jellyfin(settings),
+            Command::QuickConnect { url, device_id } => self.quick_connect(url, device_id),
+            Command::CancelQuickConnect => {
+                if let Some(c) = self.quick_connect_cancel.take() {
+                    c.store(true, Ordering::Relaxed);
+                }
+            }
             Command::PreviewJobs {
                 paths,
                 profile_id,
@@ -678,6 +687,27 @@ impl Backend {
         });
     }
 
+    fn quick_connect(&mut self, url: String, device_id: String) {
+        if let Some(c) = self.quick_connect_cancel.take() {
+            c.store(true, Ordering::Relaxed);
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.quick_connect_cancel = Some(cancel.clone());
+        let tx = self.internal.clone();
+        tokio::spawn(async move {
+            jellyfin::quick_connect(
+                &url,
+                &device_id,
+                std::time::Duration::from_secs(2),
+                cancel,
+                move |e| {
+                    let _ = tx.send(Internal::QuickConnect(e));
+                },
+            )
+            .await;
+        });
+    }
+
     fn reserved_targets(&self) -> HashSet<PathBuf> {
         self.jobs
             .iter()
@@ -875,6 +905,12 @@ impl Backend {
                 });
             }
             Internal::Jellyfin(result) => self.emit(AppEvent::Jellyfin(result)),
+            Internal::QuickConnect(event) => {
+                if matches!(event, jellyfin::QuickConnectEvent::Done(_)) {
+                    self.quick_connect_cancel = None;
+                }
+                self.emit(AppEvent::QuickConnect(event));
+            }
             Internal::ScanDone(root, outcome) => {
                 self.scan_cancel = None;
                 if !outcome.cancelled {

@@ -253,11 +253,17 @@ impl SourceKind {
 pub struct JellyfinSettings {
     /// Base URL, e.g. `http://jellyfin.local:8096`.
     pub url: String,
-    /// API key (Dashboard → API keys). Stored in the config file, which is
-    /// only readable by the user.
+    /// API key (Dashboard → API keys) or the access token of a Quick Connect
+    /// login. Stored in the config file, which is only readable by the user.
     pub api_key: String,
     /// Library ids to read; empty = all movie and series libraries.
     pub libraries: Vec<String>,
+    /// User of a Quick Connect login (empty = `api_key` is an API key).
+    pub user_id: String,
+    pub user_name: String,
+    /// Identifies this installation to the server; Jellyfin binds the
+    /// Quick Connect token to it.
+    pub device_id: String,
 }
 
 impl JellyfinSettings {
@@ -393,6 +399,7 @@ mod tests {
                 url: "http://jf.local:8096/".into(),
                 api_key: "secret".into(),
                 libraries: vec!["abc".into()],
+                ..JellyfinSettings::default()
             },
             ..AppConfig::default()
         };
