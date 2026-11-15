@@ -274,7 +274,7 @@ Lücken, Längen, Zeitsprünge) > **Abspielrisiko** > OK/ungeprüft. Ergebnisse
 liegen in der Tabelle `health` (Schema-Version 2) mit einem Fingerabdruck
 (Größe, Änderungszeit, Media-Source-Id) und `CHECK_VERSION`; geänderte Dateien
 und Ergebnisse älterer Prüfversionen gelten wieder als ungeprüft. Der Lauf ist abbrechbar, prüft `parallel` Dateien gleichzeitig und
-aktualisiert die Bibliothek höchstens alle 3 s.
+aktualisiert die Bibliothek höchstens alle 10 s.
 
 ### Encoding Queue
 ```

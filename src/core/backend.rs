@@ -1226,7 +1226,7 @@ impl Backend {
     fn schedule(&mut self) {
         if let Some(run) = &mut self.health_run
             && run.dirty
-            && run.published.elapsed() >= Duration::from_secs(3)
+            && run.published.elapsed() >= Duration::from_secs(10)
         {
             run.dirty = false;
             run.published = std::time::Instant::now();

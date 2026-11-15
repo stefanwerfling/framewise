@@ -1,6 +1,6 @@
 //! Media library: sortable/filterable table with detail panel.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
@@ -68,6 +68,8 @@ pub struct LibraryUi {
     export: Option<(String, mpsc::Receiver<Option<PathBuf>>)>,
     /// Series overview of the library behind the pointer.
     overview: Option<(usize, Arc<LibrarySummary>)>,
+    /// Row index by path of the library behind the pointer.
+    index: Option<(usize, Arc<HashMap<PathBuf, usize>>)>,
 }
 
 impl Default for LibraryUi {
@@ -88,6 +90,7 @@ impl Default for LibraryUi {
             cache: None,
             export: None,
             overview: None,
+            index: None,
         }
     }
 }
@@ -95,6 +98,24 @@ impl Default for LibraryUi {
 impl LibraryUi {
     pub fn invalidate(&mut self) {
         self.cache = None;
+    }
+
+    /// Row by path (built once per library, the table can be large).
+    fn index(&mut self, lib: &Arc<Vec<LibraryEntry>>) -> Arc<HashMap<PathBuf, usize>> {
+        let ptr = Arc::as_ptr(lib) as usize;
+        match &self.index {
+            Some((p, map)) if *p == ptr => map.clone(),
+            _ => {
+                let map: Arc<HashMap<PathBuf, usize>> = Arc::new(
+                    lib.iter()
+                        .enumerate()
+                        .map(|(i, e)| (e.media.absolute_path.clone(), i))
+                        .collect(),
+                );
+                self.index = Some((ptr, map.clone()));
+                map
+            }
+        }
     }
 
     fn filter_key(&self) -> u64 {
@@ -159,42 +180,50 @@ impl LibraryUi {
             })
             .map(|(i, _)| i)
             .collect();
-        rows.sort_by(|&a, &b| {
-            let (x, y) = (&lib[a], &lib[b]);
-            let ord = match self.sort {
-                SortKey::Name => x
-                    .media
-                    .display_name()
-                    .to_lowercase()
-                    .cmp(&y.media.display_name().to_lowercase()),
-                SortKey::Folder => x.media.folder().cmp(&y.media.folder()),
-                SortKey::Size => x.media.size_bytes.cmp(&y.media.size_bytes),
-                SortKey::Resolution => pixels(x).cmp(&pixels(y)),
-                SortKey::Codec => codec(x).cmp(&codec(y)),
-                SortKey::Bitrate => x.media.overall_bitrate().cmp(&y.media.overall_bitrate()),
-                SortKey::Duration => x
-                    .media
-                    .duration_s()
-                    .unwrap_or(0.0)
-                    .total_cmp(&y.media.duration_s().unwrap_or(0.0)),
-                SortKey::Potential => x
-                    .analysis
-                    .potential_score
-                    .cmp(&y.analysis.potential_score)
-                    .then(
-                        x.analysis
-                            .estimated_savings
-                            .cmp(&y.analysis.estimated_savings),
-                    ),
-                SortKey::Compatibility => x.analysis.compatibility.cmp(&y.analysis.compatibility),
-                SortKey::Health => x
-                    .health
-                    .state()
-                    .cmp(&y.health.state())
-                    .then(x.health.findings().len().cmp(&y.health.findings().len())),
-            };
-            if self.descending { ord.reverse() } else { ord }
-        });
+        // Keys that allocate are computed once per row, not per comparison
+        // (tens of thousands of rows).
+        match self.sort {
+            SortKey::Name => {
+                rows.sort_by_cached_key(|&i| lib[i].media.display_name().to_lowercase());
+            }
+            SortKey::Folder => rows.sort_by_cached_key(|&i| lib[i].media.folder()),
+            SortKey::Codec => rows.sort_by_cached_key(|&i| codec(&lib[i])),
+            SortKey::Health => rows.sort_by_cached_key(|&i| {
+                let h = &lib[i].health;
+                (h.state(), h.findings().len())
+            }),
+            _ => rows.sort_by(|&a, &b| {
+                let (x, y) = (&lib[a], &lib[b]);
+                match self.sort {
+                    SortKey::Size => x.media.size_bytes.cmp(&y.media.size_bytes),
+                    SortKey::Resolution => pixels(x).cmp(&pixels(y)),
+                    SortKey::Bitrate => x.media.overall_bitrate().cmp(&y.media.overall_bitrate()),
+                    SortKey::Duration => x
+                        .media
+                        .duration_s()
+                        .unwrap_or(0.0)
+                        .total_cmp(&y.media.duration_s().unwrap_or(0.0)),
+                    SortKey::Potential => x
+                        .analysis
+                        .potential_score
+                        .cmp(&y.analysis.potential_score)
+                        .then(
+                            x.analysis
+                                .estimated_savings
+                                .cmp(&y.analysis.estimated_savings),
+                        ),
+                    SortKey::Compatibility => {
+                        x.analysis.compatibility.cmp(&y.analysis.compatibility)
+                    }
+                    SortKey::Name | SortKey::Folder | SortKey::Codec | SortKey::Health => {
+                        std::cmp::Ordering::Equal
+                    }
+                }
+            }),
+        }
+        if self.descending {
+            rows.reverse();
+        }
         self.cache = Some((ptr, key, rows.clone()));
         rows
     }
@@ -414,22 +443,20 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
                 strategy,
             });
         }
-        let actionable: Vec<PathBuf> = rows
-            .iter()
-            .map(|&i| &lib[i])
-            .filter(|e| {
-                !e.queued
-                    && matches!(
-                        e.analysis.recommendation,
-                        Recommendation::Transcode | Recommendation::Remux
-                    )
-            })
-            .map(|e| e.media.absolute_path.clone())
-            .collect();
+        let recommended = |i: &&usize| {
+            let e = &lib[**i];
+            !e.queued
+                && matches!(
+                    e.analysis.recommendation,
+                    Recommendation::Transcode | Recommendation::Remux
+                )
+        };
+        // Count every frame, collect the paths only on click.
+        let n_actionable = rows.iter().filter(recommended).count();
         if ui
             .add_enabled(
-                !actionable.is_empty(),
-                egui::Button::new(trf!("Add all recommended shown ({})", actionable.len())),
+                n_actionable > 0,
+                egui::Button::new(trf!("Add all recommended shown ({})", n_actionable)),
             )
             .on_hover_text(tr!(
                 "Only files with recommendation 'Re-encode' or 'Remux' that are not queued yet"
@@ -437,7 +464,11 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
             .clicked()
         {
             app.send(Command::PreviewJobs {
-                paths: actionable,
+                paths: rows
+                    .iter()
+                    .filter(recommended)
+                    .map(|&i| lib[i].media.absolute_path.clone())
+                    .collect(),
                 profile_id,
                 strategy,
             });
@@ -446,11 +477,13 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
     ui.separator();
 
     // ---- details panel
+    let index = app.library_ui.index(&lib);
     let focus_entry = app
         .library_ui
         .focus
         .as_ref()
-        .and_then(|f| lib.iter().find(|e| &e.media.absolute_path == f));
+        .and_then(|f| index.get(f))
+        .map(|&i| &lib[i]);
     if let Some(entry) = focus_entry {
         egui::Panel::right("library_details")
             .resizable(true)
@@ -1221,35 +1254,37 @@ fn health_controls(
             ui.label(RichText::new(p.current).small().color(theme::MUTED));
             return;
         }
-        let shown: Vec<PathBuf> = rows.iter().map(|&i| lib[i].media.absolute_path.clone()).collect();
+        // Runs every frame on libraries with tens of thousands of rows:
+        // count without copying paths; build the lists only on click.
         let recheck = app.library_ui.recheck;
-        let todo = |paths: &[PathBuf]| {
-            if recheck {
-                return paths.len();
-            }
-            let want: HashSet<&PathBuf> = paths.iter().collect();
-            lib.iter()
-                .filter(|e| want.contains(&e.media.absolute_path) && !e.health.checked())
-                .count()
-        };
-        let n_shown = todo(&shown);
+        let pending = |i: usize| recheck || !lib[i].health.checked();
+        let n_shown = rows.iter().filter(|&&i| pending(i)).count();
         if ui
             .add_enabled(n_shown > 0, egui::Button::new(trf!("Check shown ({})", n_shown)))
             .clicked()
         {
             app.send(Command::CheckHealth {
-                paths: shown,
+                paths: rows
+                    .iter()
+                    .map(|&i| lib[i].media.absolute_path.clone())
+                    .collect(),
                 recheck,
             });
         }
-        let selected = selected_set(&app.library_ui.selected);
-        let n_sel = todo(&selected);
+        let index = app.library_ui.index(lib);
+        let n_sel = app
+            .library_ui
+            .selected
+            .iter()
+            .filter_map(|p| index.get(p))
+            .filter(|&&i| pending(i))
+            .count();
         if ui
             .add_enabled(n_sel > 0, egui::Button::new(trf!("Check selected ({})", n_sel)))
             .clicked()
         {
             app.send(Command::CheckHealth {
-                paths: selected,
+                paths: selected_set(&app.library_ui.selected),
                 recheck,
             });
         }
