@@ -30,6 +30,7 @@ use crate::i18n;
 use crate::media::model::MediaFile;
 use crate::monitor::{self, GateBlock, Monitor, ResourceSnapshot};
 use crate::persistence::Database;
+use crate::queue::finalize::{self, RealFs, Recovery};
 use crate::queue::job::{self, HistoryEntry, Job, JobId, JobState, now_unix};
 use crate::queue::runner::{self, RunOutcome, RunnerContext, RunnerEvent};
 use crate::scanner::{self, DiscoveryOptions, DuplicateGroup, ScanOutcome, ScanRequest};
@@ -235,9 +236,13 @@ impl Backend {
         }
     }
 
-    fn save_job(&self, job: &Job) {
-        if let Err(e) = self.db.save_job(job) {
-            tracing::error!("saving job {} failed: {e}", job.id);
+    fn save_job(&self, job: &Job) -> bool {
+        match self.db.save_job(job) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::error!("saving job {} failed: {e}", job.id);
+                false
+            }
         }
     }
 
@@ -290,6 +295,8 @@ impl Backend {
             Err(e) => self.notice(NoticeLevel::Error, e.to_string()),
         }
         self.next_job_id = self.db.next_job_id().unwrap_or(1);
+        // Before the orphan cleanup: recovery may need the work directories.
+        self.recover_finalizations();
         runner::cleanup_orphans(&self.work_root(), &[]);
         // Queued jobs are not started automatically after a restart.
         self.queue_paused = self.jobs.iter().any(|j| j.state == JobState::Queued);
@@ -309,6 +316,65 @@ impl Backend {
 
         self.detect_tools();
         self.start_monitor();
+    }
+
+    /// Complete or undo finalizations interrupted by a crash.
+    fn recover_finalizations(&mut self) {
+        for (id, path) in finalize::pending(&self.work_root()) {
+            match finalize::recover(&RealFs, &path, id) {
+                Recovery::Completed(journal) => {
+                    let Some(job) = self.jobs.iter_mut().find(|j| j.id == id) else {
+                        // The job is gone (deleted); the files are in place.
+                        finalize::release(&RealFs, &path);
+                        continue;
+                    };
+                    job.state = JobState::Done;
+                    job.error = None;
+                    job.sidecars = journal.sidecars();
+                    job.result_size = journal.result.result_size;
+                    job.quality = journal.result.quality;
+                    job.validation = journal.result.validation;
+                    job.finished_unix = Some(now_unix());
+                    job.paused = false;
+                    job.progress = Default::default();
+                    let job = job.clone();
+                    if self.save_job(&job) {
+                        finalize::release(&RealFs, &path);
+                    }
+                    if let Err(e) = self.db.add_history(&HistoryEntry::from_job(&job)) {
+                        tracing::error!("history insert failed: {e}");
+                    }
+                    self.notice(
+                        NoticeLevel::Info,
+                        trf!(
+                            "Interrupted finalization completed: {}",
+                            job.media.file_name
+                        ),
+                    );
+                }
+                Recovery::RolledBack { reason, .. } => {
+                    tracing::warn!("finalization of job {id} rolled back: {reason}");
+                    self.notice(
+                        NoticeLevel::Warning,
+                        trf!(
+                            "Interrupted finalization of job {} undone – it can be restarted",
+                            id
+                        ),
+                    );
+                }
+                Recovery::Incomplete { error, .. } => {
+                    tracing::error!("finalization of job {id} not recoverable: {error}");
+                    self.notice(
+                        NoticeLevel::Error,
+                        trf!(
+                            "Finalization of job {} could not be completed or undone: {}",
+                            id,
+                            error
+                        ),
+                    );
+                }
+            }
+        }
     }
 
     fn detect_tools(&self) {
@@ -808,7 +874,13 @@ impl Backend {
         job.paused = false;
         job.progress = Default::default();
         let job = job.clone();
-        self.save_job(&job);
+        // The finalization journal may only go once the job is saved: until
+        // then a crash must be able to record the published result.
+        if self.save_job(&job)
+            && let Some(journal) = &outcome.journal
+        {
+            finalize::release(&RealFs, journal);
+        }
         if job.state != JobState::Cancelled
             && let Err(e) = self.db.add_history(&HistoryEntry::from_job(&job))
         {

@@ -198,14 +198,26 @@ Queued ─▶ Preparing ─▶ QualitySearch ─▶ Encoding ─▶ Sidecars ─
   **Last-Gate** frei ist (CPU-Last < Zielwert, freier RAM > Minimum, freier
   Platz im Arbeits-/Zielverzeichnis ausreichend). Sonst Verzögerung + Anzeige.
 * **Arbeitsverzeichnis:** `<work>/<job-id>/` – ffmpeg schreibt nur dorthin. `<work>` ist standardmäßig `<Zielverzeichnis>/.framewise-work` (nicht die Systemplatte; Ergebnis wird per Umbenennen ins Ziel gelegt).
-  Nach Validierung atomares `rename` in das Ziel; bei anderem Dateisystem
-  zuerst Kopie in `<ziel-dir>/.framewise-<id>.partial`, dann `rename`.
-  Existiert das Ziel inzwischen, wird **nicht** überschrieben (Konfliktstrategie).
+  Nach Validierung werden Hauptdatei und Sidecars als **eine Transaktion**
+  veröffentlicht (`queue/finalize.rs`, Journal unter `<work>/journal/job-<id>.json`):
+  1. *Staging:* jede Datei wird neben ihr Ziel als
+     `.framewise-job<id>-<name>.partial` gelegt (Umbenennen, bei anderem
+     Dateisystem Kopie + `fsync`).
+  2. *Publishing:* zu ersetzende Ziele werden zu `.bak` umbenannt, dann jede
+     Datei per Hardlink ohne Überschreiben platziert; Größen werden geprüft.
+  3. *Committed:* erst jetzt werden Sicherungen und Reste gelöscht.
+
+  Ein Fehler vor dem Commit macht alles rückgängig. Existiert ein Ziel
+  inzwischen, wird **nicht** überschrieben (Konfliktstrategie). Das Journal
+  wird erst gelöscht, wenn der Job-Zustand gespeichert ist.
 * **Pause:** Queue-Pause (keine neuen Jobs) und Job-Pause (Unix: `SIGSTOP`/
   `SIGCONT`; Windows: nur Queue-Pause – ehrlich in der GUI ausgewiesen).
 * **Abbruch:** Prozess beenden, Job-Arbeitsverzeichnis löschen (nur dieses).
 * **Recovery:** Beim Start werden Jobs in einem aktiven Zustand auf
-  `Interrupted` gesetzt und verwaiste Arbeitsverzeichnisse entfernt. Gibt es
+  `Interrupted` gesetzt. Offene Journale werden abgeschlossen (Job wird `Done`),
+  wenn alle Dateien noch da sind, sonst zurückgerollt (Job bleibt `Interrupted`).
+  Danach werden verwaiste Arbeitsverzeichnisse entfernt – außer denen von Jobs,
+  deren Journal noch offen ist. Gibt es
   wartende Jobs, startet die Queue **pausiert** – der Benutzer entscheidet,
   wann es weitergeht.
 * **Fortschritt:** ausschließlich über `-progress pipe:1`

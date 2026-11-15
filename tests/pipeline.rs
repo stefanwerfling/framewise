@@ -19,6 +19,7 @@ use framewise::encoding::profile::{EncodingProfile, HdrStrategy, QualityMetric, 
 use framewise::encoding::quality::AutoChoice;
 use framewise::media::model::{AudioCodec, HdrFormat, SubtitleCodec, VideoCodec};
 use framewise::media::probe::{self, FileFacts};
+use framewise::queue::finalize;
 use framewise::queue::job::{Job, JobState};
 use framewise::queue::runner::{self, RunnerContext};
 use framewise::scanner::{self, DiscoveryOptions, ScanRequest};
@@ -309,6 +310,12 @@ async fn scan_encode_validate_legacy_file() {
         !runner::job_work_dir(&ctx.work_root, 1).exists(),
         "work dir cleaned"
     );
+    // The committed journal stays until the job is saved, then goes.
+    let journal = result.journal.clone().expect("committed journal");
+    assert!(journal.exists());
+    finalize::release(&finalize::RealFs, &journal);
+    assert!(!journal.exists());
+    assert!(finalize::pending(&ctx.work_root).is_empty());
 
     // --- check output streams
     let facts = FileFacts {

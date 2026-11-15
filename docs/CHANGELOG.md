@@ -359,3 +359,23 @@ statt fest im Profil zu stehen.
   Rückfall ohne 10-Bit-x265, Validierung des Dynamikumfangs, End-to-End-Test: HDR10-Clip
   mit Mastering-Daten → HEVC 10 Bit, Metadaten im Ergebnis identisch. Läuft mit ffmpeg 4.4
   und 8.1.
+
+### Phase 12 – Transaktionale Fertigstellung
+- **Hauptdatei und Sidecars kommen gemeinsam ins Ziel oder gar nicht** (`queue/finalize.rs`).
+  Bisher wurde jede Datei einzeln platziert; ein Fehler bei einem Sidecar blieb nur eine
+  Warnung, ein Absturz konnte ein halbes Ergebnis hinterlassen.
+  - Ablauf in drei Phasen (Staging → Publishing → Committed), jede vorher im Journal
+    `<work>/journal/job-<id>.json` festgehalten.
+  - Ersetzte Dateien werden bis zum Commit nur als `.bak` geparkt, nie vorher gelöscht.
+  - Ein Fehler vor dem Commit macht alles rückgängig; die Ergebnisse liegen dann wieder im
+    Arbeitsverzeichnis.
+  - Beim Start werden offene Journale abgeschlossen oder zurückgerollt, bevor verwaiste
+    Arbeitsverzeichnisse entfernt werden. Ein abgeschlossener Job wird mit seinen
+    Ergebnissen (Größe, Qualität, Validierung) als fertig gespeichert.
+  - Das Journal wird erst gelöscht, wenn der Job-Zustand in der Datenbank steht.
+  - Ein Job mit offenem Journal startet nicht erneut, bis die Anwendung neu gestartet wurde.
+- Sidecar-Namen weichen jetzt auch einander aus, nicht nur vorhandenen Dateien.
+- `runner::place_file` entfällt.
+- Neue Tests: Fehler bzw. „Absturz“ an jedem einzelnen Dateisystem-Schritt endet immer
+  vollständig oder unberührt, Ersetzen behält alte Dateien bis zum Commit, Recovery,
+  Aufräumen schont Arbeitsverzeichnisse mit offenem Journal.

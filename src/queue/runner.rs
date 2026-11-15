@@ -4,7 +4,8 @@
 //! Safety guarantees:
 //! * the source is only ever read,
 //! * ffmpeg writes exclusively into `<work>/<job-id>/`,
-//! * the result is moved into place only after successful validation,
+//! * the result and its sidecars are published only after successful
+//!   validation, as one transaction (see [`super::finalize`]),
 //! * an existing target is never overwritten unless the user confirmed
 //!   replacement for this job (no-clobber placement via hard links),
 //! * on failure/cancel the job's work directory is removed (only that one).
@@ -12,6 +13,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use super::finalize::{self, FileRole, JobResult, PlannedFile, RealFs};
 use super::job::{Job, JobProgress, JobState};
 use super::method;
 use crate::core::config::{EncodingSettings, ResourceSettings};
@@ -63,6 +65,9 @@ pub struct RunOutcome {
     pub sidecars: Vec<PathBuf>,
     /// Final target path (may differ for sidecar renames).
     pub target: Option<PathBuf>,
+    /// Journal of the committed finalization. Pass it to
+    /// [`finalize::release`] once the job state has been saved.
+    pub journal: Option<PathBuf>,
 }
 
 impl RunOutcome {
@@ -119,75 +124,6 @@ pub(super) fn resolve_setup(
     }
 }
 
-/// Move `src` to `dst` without ever clobbering an existing file unless
-/// `replace` is set. Works across file systems (copy to a hidden partial file
-/// in the target directory first, then link/rename atomically).
-pub fn place_file(src: &Path, dst: &Path, replace: bool) -> io::Result<()> {
-    let dir = dst
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "target has no parent"))?;
-    std::fs::create_dir_all(dir)?;
-
-    if replace {
-        return match std::fs::rename(src, dst) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
-                let partial = partial_path(dst);
-                copy_synced(src, &partial)?;
-                std::fs::rename(&partial, dst).inspect_err(|_| {
-                    let _ = std::fs::remove_file(&partial);
-                })?;
-                std::fs::remove_file(src)
-            }
-            Err(e) => Err(e),
-        };
-    }
-
-    // No-clobber: hard_link fails atomically if `dst` exists.
-    match std::fs::hard_link(src, dst) {
-        Ok(()) => return std::fs::remove_file(src),
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(e),
-        Err(_) => {} // cross-device or links unsupported → copy path
-    }
-    let partial = partial_path(dst);
-    copy_synced(src, &partial)?;
-    let linked = std::fs::hard_link(&partial, dst);
-    let result = match linked {
-        Ok(()) => std::fs::remove_file(&partial),
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-            let _ = std::fs::remove_file(&partial);
-            Err(e)
-        }
-        Err(_) => {
-            // File system without hard links: best effort check + rename.
-            if dst.exists() {
-                let _ = std::fs::remove_file(&partial);
-                Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "target exists",
-                ))
-            } else {
-                std::fs::rename(&partial, dst)
-            }
-        }
-    };
-    result?;
-    std::fs::remove_file(src)
-}
-
-fn partial_path(dst: &Path) -> PathBuf {
-    let name = dst
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    dst.with_file_name(format!(".framewise-{}-{name}.partial", std::process::id()))
-}
-
-fn copy_synced(src: &Path, dst: &Path) -> io::Result<()> {
-    std::fs::copy(src, dst)?;
-    std::fs::File::open(dst)?.sync_all()
-}
-
 /// Remove a job work directory – only if it really lies inside `work_root`.
 fn remove_work_dir(work_root: &Path, dir: &Path) {
     if dir.starts_with(work_root)
@@ -204,16 +140,23 @@ pub fn job_work_dir(work_root: &Path, job_id: i64) -> PathBuf {
 }
 
 /// Remove work directories of jobs that are not running (startup recovery).
+/// Jobs with a pending finalization journal keep theirs: recovery may still
+/// need the files in it.
 pub fn cleanup_orphans(work_root: &Path, active: &[i64]) {
     let Ok(entries) = std::fs::read_dir(work_root) else {
         return;
     };
+    let pending: Vec<i64> = finalize::pending(work_root)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
         if let Some(id) = name
             .strip_prefix("job-")
             .and_then(|n| n.parse::<i64>().ok())
             && !active.contains(&id)
+            && !pending.contains(&id)
         {
             remove_work_dir(work_root, &e.path());
         }
@@ -229,6 +172,13 @@ pub async fn run_job<F>(
 where
     F: Fn(RunnerEvent) + Send + Sync,
 {
+    if finalize::journal_path(&ctx.work_root, job.id).exists() {
+        return RunOutcome {
+            state: Some(JobState::Failed),
+            error: Some(tr!("A previous finalization of this job is still pending – restart the application to complete or undo it").to_string()),
+            ..RunOutcome::default()
+        };
+    }
     let work_dir = job_work_dir(&ctx.work_root, job.id);
     let result = run_inner(ctx, job, handle, &emit, &work_dir).await;
     let outcome = match result {
@@ -697,44 +647,69 @@ where
         });
     }
 
-    // 8. Finalize: move into place (no clobber unless confirmed).
+    // 8. Finalize: publish main output and sidecars as one transaction
+    //    (no clobber unless confirmed; all or nothing).
     emit(RunnerEvent::State(JobState::Finalizing));
     let result_size = tokio::fs::metadata(&temp_output)
         .await
         .ok()
         .map(|m| m.len());
-    let (src, dst, replace) = (
-        temp_output.clone(),
-        job.target.clone(),
-        job.replace_existing,
-    );
-    tokio::task::spawn_blocking(move || place_file(&src, &dst, replace))
-        .await
-        .map_err(|e| Error::io(&job.target, io::Error::other(e)))?
-        .map_err(|e| {
-            if e.kind() == io::ErrorKind::AlreadyExists {
-                Error::InvalidPaths(trf!("Target already exists: {}", job.target.display()))
-            } else {
-                Error::io(&job.target, e)
-            }
-        })?;
-
-    let mut sidecars = Vec::new();
+    let replace = job.replace_existing;
+    let mut files = vec![PlannedFile {
+        role: FileRole::Main,
+        source: temp_output.clone(),
+        target: job.target.clone(),
+        replace,
+    }];
     for (temp, final_path) in sidecar_temp {
-        let mut dst = final_path.clone();
-        if dst.exists() && !replace {
-            dst = (1..1000)
+        let taken = |p: &Path| files.iter().any(|f| f.target == p);
+        let free = |p: &Path| !taken(p) && (replace || !p.exists());
+        let target = if free(&final_path) {
+            final_path.clone()
+        } else {
+            match (1..1000)
                 .map(|n| numbered_variant(&final_path, n))
-                .find(|p| !p.exists())
-                .unwrap_or(dst);
-        }
-        let (s, d) = (temp.clone(), dst.clone());
-        match tokio::task::spawn_blocking(move || place_file(&s, &d, replace)).await {
-            Ok(Ok(())) => sidecars.push(dst),
-            Ok(Err(e)) => tracing::warn!("sidecar {} not placed: {e}", final_path.display()),
-            Err(e) => tracing::warn!("sidecar task failed: {e}"),
-        }
+                .find(|p| !taken(p) && !p.exists())
+            {
+                Some(p) => p,
+                None => {
+                    tracing::warn!("sidecar {} not placed: no free name", final_path.display());
+                    continue;
+                }
+            }
+        };
+        files.push(PlannedFile {
+            role: FileRole::Sidecar,
+            source: temp,
+            target,
+            replace,
+        });
     }
+    let job_result = JobResult {
+        result_size,
+        quality: quality_result.clone(),
+        validation: Some(report.clone()),
+    };
+    let journal_path = finalize::journal_path(&ctx.work_root, job.id);
+    let job_id = job.id;
+    let journal = tokio::task::spawn_blocking(move || {
+        finalize::finalize(&RealFs, &journal_path, job_id, files, job_result)
+    })
+    .await
+    .map_err(|e| Error::io(&job.target, io::Error::other(e)))?
+    .map_err(|e| {
+        if e.is_conflict() {
+            Error::InvalidPaths(trf!("Target already exists: {}", e.path.display()))
+        } else if e.rolled_back {
+            Error::io(&e.path, e.error)
+        } else {
+            let msg = trf!(
+                "{} – finalizing will be completed or undone at the next start",
+                e.error
+            );
+            Error::io(&e.path, io::Error::new(e.error.kind(), msg))
+        }
+    })?;
 
     Ok(RunOutcome {
         state: Some(JobState::Done),
@@ -742,40 +717,15 @@ where
         result_size,
         quality: quality_result,
         validation: Some(report),
-        sidecars,
-        target: Some(job.target.clone()),
+        sidecars: journal.sidecars(),
+        target: journal.target().map(Path::to_path_buf),
+        journal: Some(finalize::journal_path(&ctx.work_root, job.id)),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn place_file_never_clobbers() {
-        let dir = tempfile::tempdir().unwrap();
-        let src = dir.path().join("work/out.mp4");
-        let dst = dir.path().join("target/sub/Movie.mp4");
-        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
-        std::fs::write(&src, b"new").unwrap();
-
-        place_file(&src, &dst, false).unwrap();
-        assert_eq!(std::fs::read(&dst).unwrap(), b"new");
-        assert!(!src.exists());
-
-        std::fs::write(&src, b"newer").unwrap();
-        let err = place_file(&src, &dst, false).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
-        assert_eq!(
-            std::fs::read(&dst).unwrap(),
-            b"new",
-            "existing file untouched"
-        );
-        assert!(src.exists(), "temp output kept for quarantine/cleanup");
-
-        place_file(&src, &dst, true).unwrap();
-        assert_eq!(std::fs::read(&dst).unwrap(), b"newer");
-    }
 
     #[test]
     fn work_dir_cleanup_is_confined() {
@@ -792,5 +742,20 @@ mod tests {
         assert!(!job_work_dir(&root, 7).exists());
         assert!(job_work_dir(&root, 8).exists());
         assert!(root.join("quarantine").exists());
+    }
+
+    #[test]
+    fn pending_finalization_keeps_work_dir_and_blocks_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("work");
+        std::fs::create_dir_all(job_work_dir(&root, 5)).unwrap();
+        std::fs::create_dir_all(job_work_dir(&root, 6)).unwrap();
+        let journal = finalize::journal_path(&root, 5);
+        std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+        std::fs::write(&journal, b"{}").unwrap();
+        cleanup_orphans(&root, &[]);
+        assert!(job_work_dir(&root, 5).exists(), "recovery may need it");
+        assert!(!job_work_dir(&root, 6).exists());
+        assert!(journal.exists(), "journal is not a work dir");
     }
 }

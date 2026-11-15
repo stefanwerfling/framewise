@@ -461,3 +461,8 @@
 "libx265 cannot encode 10 bit – HDR is converted to SDR" = "libx265 kann kein 10 Bit encodieren – HDR wird nach SDR konvertiert"
 "{} is kept as {}; dynamic metadata is dropped" = "{} wird als {} erhalten; dynamische Metadaten entfallen"
 "Dynamic range" = "Dynamikumfang"
+"A previous finalization of this job is still pending – restart the application to complete or undo it" = "Eine frühere Fertigstellung dieses Jobs ist noch offen – bitte die Anwendung neu starten, um sie abzuschließen oder rückgängig zu machen"
+"{} – finalizing will be completed or undone at the next start" = "{} – die Fertigstellung wird beim nächsten Start abgeschlossen oder rückgängig gemacht"
+"Interrupted finalization completed: {}" = "Unterbrochene Fertigstellung abgeschlossen: {}"
+"Interrupted finalization of job {} undone – it can be restarted" = "Unterbrochene Fertigstellung von Job {} rückgängig gemacht – er kann neu gestartet werden"
+"Finalization of job {} could not be completed or undone: {}" = "Fertigstellung von Job {} konnte weder abgeschlossen noch rückgängig gemacht werden: {}"
