@@ -267,7 +267,16 @@ fn bloated_h264_is_reencoded_and_space_saver_always_encodes() {
     );
     let a = analyze(&m, &EncodingProfile::universal(), &caps());
     assert_eq!(a.recommendation, Recommendation::Transcode);
-    assert_eq!(a.compatibility, Compatibility::Compatible);
+    // 35 Mbit/s exceed what every player takes (20 Mbit/s).
+    assert_eq!(a.compatibility, Compatibility::Partial);
+    assert!(
+        a.plan
+            .video
+            .as_ref()
+            .unwrap()
+            .reasons
+            .contains(&VideoReason::BitrateAboveLimit(35_000_000))
+    );
 
     let small = media(
         "mp4",

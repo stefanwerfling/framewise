@@ -152,7 +152,12 @@ pub enum VideoReason {
     Resolution(Dimensions),
     OddDimensions,
     Interlaced,
-    HighBitrate { bpp: f64 },
+    HighBitrate {
+        bpp: f64,
+    },
+    /// Above the profile's peak bitrate (bits/s).
+    BitrateAboveLimit(u64),
+    VariableFrameRate,
     ProfileForcesEncode,
 }
 
@@ -168,6 +173,12 @@ impl VideoReason {
             VideoReason::Interlaced => tr!("interlaced source").into(),
             VideoReason::HighBitrate { bpp } => {
                 trf!("high bitrate ({} bits/pixel)", format!("{bpp:.2}"))
+            }
+            VideoReason::BitrateAboveLimit(b) => {
+                trf!("bitrate {} Mbit/s above the limit", b / 1_000_000)
+            }
+            VideoReason::VariableFrameRate => {
+                tr!("variable frame rate – encoded at a constant rate").into()
             }
             VideoReason::ProfileForcesEncode => tr!("profile requires re-encoding").into(),
         }
@@ -720,6 +731,16 @@ fn plan_video(
         .video_bitrate()
         .zip(v.fps())
         .and_then(|(br, fps)| bits_per_pixel(br, source, fps));
+    if v.variable_frame_rate {
+        reasons.push(VideoReason::VariableFrameRate);
+    }
+    if settings.max_bitrate_mbps > 0
+        && let Some(rate) = media
+            .video_bitrate()
+            .filter(|r| *r > u64::from(settings.max_bitrate_mbps) * 1_000_000)
+    {
+        reasons.push(VideoReason::BitrateAboveLimit(rate));
+    }
     if reasons.is_empty()
         && let Some(bpp) = bpp.filter(|b| *b > settings.copy_max_bpp)
     {

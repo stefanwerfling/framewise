@@ -231,14 +231,17 @@ geschrieben.
 
 Zwei Stufen, beide für lokale Dateien und Jellyfin:
 
-1. **Abspielrisiko** (`health::risk`, ohne Dateizugriff): aus den Scan-Daten
-   und dem eingestellten Abspielgerät (`HealthSettings`, Standard: Android TV /
-   Fire TV mit Jellyfin-App). Gemeldet wird, was der Server live umwandeln
-   müsste (VC-1/MPEG-2/MPEG-4 ASP, H.264 10 Bit, Interlaced, DV-Profil 5 ohne
-   DV-Decoder, DTS/TrueHD, automatisch eingeblendete PGS/ASS-Untertitel,
-   AVI/WMV …, Auflösung/Bitrate über der Grenze) sowie variable Bildrate
-   (`r_frame_rate` ≠ `avg_frame_rate`, bei Jellyfin `RealFrameRate` ≠
-   `AverageFrameRate`). Wird bei jedem `publish_library` neu berechnet.
+1. **Abspielrisiko** (`health::risk`, ohne Dateizugriff): Abweichungen vom
+   **verträglichsten Format** – was jedes gängige TV-Gerät direkt abspielt,
+   auch der normale 1080p-Fire-TV-Stick (Amazon-Datenblätter, Jellyfin-
+   Codec-Tabellen), sodass der Server die Datei nur ausliefern muss:
+   MP4/MKV, H.264 8 Bit oder HEVC (VP9), bis 1080p, höchstens 20 Mbit/s
+   Video, progressiv, konstante Bildrate; Dolby Vision nur mit HDR10/SDR-
+   Basis (nicht Profil 5/7); Start-Tonspur AAC/AC3/E-AC3/MP3/FLAC/Opus/PCM
+   (DTS/TrueHD nur per Receiver, Vorbis/ALAC nicht in der Android-TV-App);
+   automatisch eingeblendete Untertitel nur als Text (PGS/VobSub/ASS werden
+   eingebrannt). Bewusst keine Geräteschalter. Wird bei jedem
+   `publish_library` neu berechnet.
 2. **Schnellprüfung** (`health::check`, per Knopf): ffprobe liest
    - den Kopf: Startzeit und Länge von Bild und Haupttonspur → Versatz
      > 100 ms, Längenunterschied > 3 s;
@@ -251,6 +254,10 @@ Zwei Stufen, beide für lokale Dateien und Jellyfin:
      mit `-read_intervals` und `-show_frames` (dekodiert). Bild- und Tonspur
      werden **einzeln** gewählt (`-select_streams <index>`): ein Cover-Bild
      mit Zeitstempel 0 bricht sonst das Leseintervall ab.
+   - Open GOP: in der Bild-Stichprobe werden zusätzlich die Pakete in
+     Dekodier-Reihenfolge gelesen (`packet=pts_time,flags`); folgen einem
+     Keyframe Pakete mit kleinerem pts (vorlaufende RASL-Bilder), ist es ein
+     Open GOP – auf Fire TV als Ursache für Tonversatz berichtet.
    - Ausgewertet: Dekodierfehler (eindeutige Meldungen oder ≥ 3 Zeilen;
      typische Meldungen direkt nach dem Springen wie „Could not find ref with
      POC“ werden ignoriert), kein dekodiertes Bild, Lücken (> 100 ms Ton,

@@ -431,3 +431,19 @@ statt fest im Profil zu stehen.
 - Neue Tests: Risikoregeln, Zustandsbewertung, Kopf-/Stichproben-Auswertung, sowie mit
   echtem ffmpeg: saubere Datei, Datei mit Cover-Bild, absichtlich zerstörte Datei,
   0,6 s Tonversatz.
+
+### Phase 15 – Verträglichstes Format statt Gerätewahl
+- **Abspielrisiko** misst jetzt fest am verträglichsten Format (alle Fire-TV-Modelle, auch der
+  normale 1080p-Stick): bis 1080p, höchstens 20 Mbit/s Video, H.264 8 Bit/HEVC, kein DV-Profil
+  5/7, Start-Tonspur ohne DTS/TrueHD/Vorbis/ALAC, keine eingeblendeten Bild-/ASS-Untertitel,
+  konstante Bildrate. Die Geräteschalter in den Einstellungen entfallen.
+- **Schnellprüfung** erkennt **Open GOP** (vorlaufende Bilder nach Keyframes, x265-Standard) –
+  auf Fire TV als Ursache für Tonversatz berichtet. Prüfversion 3: ältere Ergebnisse gelten
+  als ungeprüft.
+- **Kodierung** für maximale Verträglichkeit:
+  - geschlossene GOPs (`open-gop=0` für x265) und ein Keyframe alle 4 s (`-g`, alle Encoder);
+  - Quellen mit variabler Bildrate werden mit konstanter Bildrate kodiert und gelten als
+    Grund zum Neukodieren;
+  - Profil-Einstellung „Maximale Video-Bitrate“ (Standard 20 Mbit/s): höhere Quellen werden
+    neu kodiert, x264/x265/NVENC werden per VBV (`-maxrate`/`-bufsize`) gedeckelt.
+- Kompatibilität „teilweise“ statt „kompatibel“ bei zu hoher Bitrate oder variabler Bildrate.

@@ -464,7 +464,7 @@ impl Backend {
                 duplicate: dup_paths.contains(m.absolute_path.as_path()),
                 queued: queued.contains(m.absolute_path.as_path()),
                 health: health::Health {
-                    risks: health::risk::assess(m, &self.config.health),
+                    risks: health::risk::assess(m),
                     check: self
                         .health
                         .get(&m.absolute_path)

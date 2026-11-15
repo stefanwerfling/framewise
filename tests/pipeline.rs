@@ -881,6 +881,35 @@ async fn health_check_finds_broken_data_and_audio_offset() {
         report.findings
     );
 
+    // x265's default open GOP is reported; framewise encodes closed GOPs.
+    for (open, name) in [(true, "open_gop.mp4"), (false, "closed_gop.mp4")] {
+        let path = dir.path().join(name);
+        let params = format!("log-level=error:keyint=25:open-gop={}", u8::from(open));
+        ffmpeg(&[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x180:rate=25:duration=12",
+            "-c:v",
+            "libx265",
+            // ultrafast places no leading pictures even with open-gop=1
+            "-preset",
+            "medium",
+            "-x265-params",
+            &params,
+            "-movflags",
+            "+faststart",
+            path.to_str().unwrap(),
+        ]);
+        let report = run(path).await;
+        assert_eq!(
+            report.findings.contains(&Finding::OpenGop),
+            open,
+            "{name}: {:?}",
+            report.findings
+        );
+    }
+
     // Overwrite a stretch in the middle with garbage.
     let broken = dir.path().join("broken.ts");
     let mut data = std::fs::read(&clean).unwrap();

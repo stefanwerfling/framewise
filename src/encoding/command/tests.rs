@@ -313,9 +313,30 @@ fn hevc_cpu_is_tagged_and_throttled() {
     assert_eq!(value_after(&args, "-preset"), ["medium"]);
     assert_eq!(
         value_after(&args, "-x265-params"),
-        ["log-level=error:pools=4"]
+        ["log-level=error:open-gop=0:pools=4"]
     );
     assert!(value_after(&args, "-profile:v").is_empty());
+    // Keyframe every 4 s at 23.976 fps; constant frame rate source → no -r.
+    assert_eq!(value_after(&args, "-g"), ["96"]);
+    assert_eq!(value_after(&args, "-maxrate"), ["20M"]);
+    assert_eq!(value_after(&args, "-bufsize"), ["40M"]);
+    assert!(value_after(&args, "-fps_mode").is_empty());
+
+    // A variable frame rate source is encoded at a constant rate.
+    let mut vfr = m.clone();
+    vfr.video[0].variable_frame_rate = true;
+    let plan = build_plan(&vfr, &profile, &PlanCapabilities::default());
+    let args = strings(&build_encode_args(&EncodeCommand {
+        media: &vfr,
+        plan: &plan,
+        profile: &profile,
+        setup: &setup,
+        output: Path::new("/o.mp4"),
+        crf: Some(24),
+        window: None,
+    }));
+    assert_eq!(value_after(&args, "-fps_mode"), ["cfr"]);
+    assert_eq!(value_after(&args, "-r"), ["24000/1001"]);
 }
 
 fn hevc_preserve_profile() -> EncodingProfile {

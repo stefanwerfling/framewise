@@ -84,11 +84,24 @@ impl Analysis {
     }
 }
 
+/// Plays, but not everywhere smoothly (slow devices, drift).
+fn video_degraded(reasons: &[VideoReason]) -> bool {
+    reasons.iter().any(|r| {
+        matches!(
+            r,
+            VideoReason::BitrateAboveLimit(_) | VideoReason::VariableFrameRate
+        )
+    })
+}
+
 fn video_compatible(reasons: &[VideoReason]) -> bool {
     reasons.iter().all(|r| {
         matches!(
             r,
-            VideoReason::HighBitrate { .. } | VideoReason::ProfileForcesEncode
+            VideoReason::HighBitrate { .. }
+                | VideoReason::ProfileForcesEncode
+                | VideoReason::BitrateAboveLimit(_)
+                | VideoReason::VariableFrameRate
         )
     })
 }
@@ -120,6 +133,10 @@ pub fn analyze_calibrated(
         .video
         .as_ref()
         .is_some_and(|v| video_compatible(&v.reasons));
+    let video_degraded = plan
+        .video
+        .as_ref()
+        .is_some_and(|v| video_degraded(&v.reasons));
     let audio_ok = plan.audio.iter().all(|a| {
         a.action == AudioAction::Copy
             && media
@@ -141,7 +158,7 @@ pub fn analyze_calibrated(
 
     let compatibility = if !video_ok {
         Compatibility::Incompatible
-    } else if is_mp4 && audio_ok && subs_ok {
+    } else if is_mp4 && audio_ok && subs_ok && !video_degraded {
         Compatibility::Compatible
     } else {
         Compatibility::Partial

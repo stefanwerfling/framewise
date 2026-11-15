@@ -31,6 +31,8 @@ pub enum Severity {
 pub enum Finding {
     // ---- stage 1: playback risks
     VideoCodec(String),
+    /// Leading pictures reference the previous group (open GOP).
+    OpenGop,
     TenBitH264,
     Interlaced,
     DolbyVisionWithoutFallback(Option<u8>),
@@ -92,18 +94,28 @@ impl Finding {
         use Finding::*;
         match self {
             VideoCodec(c) => trf!("video codec {} is usually converted by the server", c),
+            OpenGop => tr!(
+                "open GOP – reported to cause audio drift on Fire TV; re-encode with closed GOPs"
+            )
+            .into(),
             TenBitH264 => tr!("H.264 with 10 bit is rarely decoded in hardware").into(),
             Interlaced => tr!("interlaced video – the server deinterlaces on the fly").into(),
             DolbyVisionWithoutFallback(p) => trf!(
                 "Dolby Vision profile {} without HDR10/SDR base – wrong colours or conversion",
                 p.map_or("?".into(), |p| p.to_string())
             ),
-            ResolutionTooHigh(h) => trf!("{}p is above the device limit", h),
+            ResolutionTooHigh(h) => trf!(
+                "{}p – 1080p players (e.g. the plain Fire TV stick) cannot play it",
+                h
+            ),
             BitrateTooHigh(b) => trf!(
-                "bitrate {} Mbit/s is above the limit – stalls over Wi-Fi",
+                "video bitrate {} Mbit/s above 20 Mbit/s – not every player decodes it, stalls over Wi-Fi",
                 b / 1_000_000
             ),
-            AudioCodec(c) => trf!("audio {} is converted unless passed through", c),
+            AudioCodec(c) => trf!(
+                "audio {} is converted by the server unless a receiver takes it",
+                c
+            ),
             Subtitles(c) => trf!(
                 "{} subtitles shown by default are burned in (conversion)",
                 c
@@ -162,7 +174,8 @@ pub struct CheckReport {
 
 /// Raised when the quick check learns something new; older reports then
 /// count as unchecked. 2: MP4 index position, first sample at 0:00.
-pub const CHECK_VERSION: u32 = 2;
+/// 3: open GOP.
+pub const CHECK_VERSION: u32 = 3;
 
 impl CheckReport {
     /// Valid for the file version with `fingerprint`.

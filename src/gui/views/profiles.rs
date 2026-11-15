@@ -195,6 +195,10 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
                         ui.add(egui::DragValue::new(&mut v.copy_max_bpp).range(0.02..=1.0).speed(0.01));
                         ui.label(tr!("bit/pixel"));
                     });
+                    row(ui, tr!("Maximum video bitrate"), |ui| {
+                        ui.add(egui::DragValue::new(&mut v.max_bitrate_mbps).range(0..=200).suffix(" Mbit/s"))
+                            .on_hover_text(tr!("Peak rate for the players (0 = unlimited). 20 Mbit/s plays on every Fire TV, the plain 1080p stick included. Higher sources are re-encoded."));
+                    });
                     row(ui, tr!("Deinterlace"), |ui| {
                         ui.checkbox(&mut v.deinterlace, tr!("only frames flagged as interlaced"));
                     });

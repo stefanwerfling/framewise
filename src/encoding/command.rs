@@ -29,7 +29,7 @@ use super::profile::{EncodingProfile, TargetVideoCodec};
 use crate::analyzer::resolution::{Dimensions, ResizeOp, TargetResolution};
 use crate::core::config::HwBackend;
 use crate::encoding::hardware::{encoder_name, hwaccel_name};
-use crate::media::model::{HdrFormat, MediaFile};
+use crate::media::model::{HdrFormat, MediaFile, Ratio};
 
 /// Concrete encoder/decoder choice for one run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -273,6 +273,18 @@ struct VideoEncode<'a> {
     /// Effective 10-bit output (CPU only).
     ten_bit: bool,
     hdr: Option<HdrOutput>,
+    /// Source has a variable frame rate: output at this constant rate
+    /// (VFR drifts on TV players).
+    constant_rate: Option<Ratio>,
+}
+
+/// Seconds between keyframes: fine enough for seeking and for players that
+/// start at a keyframe, small cost in size.
+const KEYFRAME_SECONDS: f64 = 4.0;
+
+/// GOP length in frames for `fps`.
+fn gop_frames(fps: f64) -> u32 {
+    (fps * KEYFRAME_SECONDS).round().clamp(24.0, 600.0) as u32
 }
 
 fn video_encoder_args(args: &mut Args, p: &VideoEncode<'_>) {
@@ -286,11 +298,20 @@ fn video_encoder_args(args: &mut Args, p: &VideoEncode<'_>) {
         estimated_bitrate,
         ten_bit,
         ref hdr,
+        constant_rate,
     } = *p;
     let v = &profile.video;
     let backend = setup.hw_encode.unwrap_or(HwBackend::Cpu);
     let encoder = encoder_name(backend, codec).unwrap_or("libx264");
     args.pair("-c:v", encoder);
+    // Closed GOPs at a fixed distance (x264 and the hardware encoders close
+    // them by default; x265 needs `open-gop=0` below). Open GOPs are a
+    // reported cause of audio drift on Fire TV devices.
+    args.pair("-g", gop_frames(fps).to_string());
+    if let Some(rate) = constant_rate {
+        args.pair("-fps_mode", "cfr")
+            .pair("-r", format!("{}/{}", rate.num, rate.den));
+    }
     let q = crf.to_string();
     match backend {
         HwBackend::Cpu | HwBackend::Auto => {
@@ -302,6 +323,11 @@ fn video_encoder_args(args: &mut Args, p: &VideoEncode<'_>) {
             if setup.threads > 0 {
                 args.pair("-threads", setup.threads.to_string());
             }
+            // Capped CRF: quality-driven, but never above what players take.
+            if v.max_bitrate_mbps > 0 {
+                args.pair("-maxrate", format!("{}M", v.max_bitrate_mbps))
+                    .pair("-bufsize", format!("{}M", v.max_bitrate_mbps * 2));
+            }
         }
         HwBackend::Nvidia => {
             args.pair("-preset", "p5")
@@ -310,6 +336,10 @@ fn video_encoder_args(args: &mut Args, p: &VideoEncode<'_>) {
                 .pair("-cq", (crf + 1).to_string())
                 .pair("-b:v", "0")
                 .pair("-gpu", setup.gpu_index.to_string());
+            if v.max_bitrate_mbps > 0 {
+                args.pair("-maxrate", format!("{}M", v.max_bitrate_mbps))
+                    .pair("-bufsize", format!("{}M", v.max_bitrate_mbps * 2));
+            }
         }
         HwBackend::IntelQsv => {
             args.pair("-preset", "slower")
@@ -342,7 +372,7 @@ fn video_encoder_args(args: &mut Args, p: &VideoEncode<'_>) {
             args.pair("-tag:v", "hvc1");
             // x265 ignores -threads and sizes its own pool to all cores.
             if matches!(backend, HwBackend::Cpu | HwBackend::Auto) {
-                let mut params = String::from("log-level=error");
+                let mut params = String::from("log-level=error:open-gop=0");
                 if setup.threads > 0 {
                     params.push_str(&format!(":pools={}", setup.threads));
                 }
@@ -565,6 +595,11 @@ fn video_encode<'a>(cmd: &EncodeCommand<'a>) -> Option<VideoEncode<'a>> {
         ),
         ten_bit: encodes_10bit(cmd.plan, cmd.setup),
         hdr: HdrOutput::new(hdr, cmd.media),
+        constant_rate: cmd
+            .media
+            .primary_video()
+            .filter(|pv| pv.variable_frame_rate)
+            .and_then(|pv| pv.frame_rate),
     })
 }
 

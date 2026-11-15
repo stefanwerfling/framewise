@@ -115,6 +115,9 @@ pub async fn run(
         match result {
             Ok(out) => {
                 report.samples += 1;
+                if has_open_gop(&out.packets) && !report.findings.contains(&Finding::OpenGop) {
+                    report.findings.push(Finding::OpenGop);
+                }
                 report
                     .findings
                     .extend(analyze_sample(&out, at, header.video, header.audio));
@@ -437,6 +440,8 @@ pub fn sample_points(duration: Option<f64>, options: CheckOptions) -> Vec<f64> {
 #[derive(Debug, Clone, Default)]
 pub struct SampleOutput {
     pub frames: Vec<FrameInfo>,
+    /// Video packets in decode order: (pts, keyframe).
+    pub packets: Vec<(f64, bool)>,
     pub errors: Vec<String>,
 }
 
@@ -459,9 +464,12 @@ async fn sample(
     streams: &[Option<u32>],
 ) -> Result<SampleOutput, String> {
     let mut all = SampleOutput::default();
-    for &index in streams.iter().flatten() {
-        let out = sample_stream(ffprobe, input, at, seconds, index).await?;
+    // The first stream is the video: its packets show the GOP structure.
+    for (i, index) in streams.iter().enumerate() {
+        let Some(index) = *index else { continue };
+        let out = sample_stream(ffprobe, input, at, seconds, index, i == 0).await?;
         all.frames.extend(out.frames);
+        all.packets.extend(out.packets);
         all.errors.extend(out.errors);
     }
     Ok(all)
@@ -473,7 +481,14 @@ async fn sample_stream(
     at: f64,
     seconds: u32,
     index: u32,
+    packets: bool,
 ) -> Result<SampleOutput, String> {
+    let mut entries = String::from(
+        "frame=media_type,stream_index,best_effort_timestamp_time,pts_time,duration_time",
+    );
+    if packets {
+        entries.push_str(":packet=pts_time,flags");
+    }
     let mut args: Vec<OsString> = vec![
         "-v".into(),
         "error".into(),
@@ -482,7 +497,7 @@ async fn sample_stream(
         "-read_intervals".into(),
         format!("{at:.3}%+{seconds}").into(),
         "-show_entries".into(),
-        "frame=media_type,stream_index,best_effort_timestamp_time,pts_time,duration_time".into(),
+        entries.into(),
         "-of".into(),
         "json".into(),
     ];
@@ -497,11 +512,27 @@ async fn sample_stream(
 }
 
 pub fn parse_sample(json: &[u8], stderr: &str) -> SampleOutput {
-    let frames = serde_json::from_slice::<Value>(json)
+    // With packets requested ffprobe interleaves both in `packets_and_frames`.
+    let entries = serde_json::from_slice::<Value>(json)
         .ok()
-        .and_then(|v| v["frames"].as_array().cloned())
-        .unwrap_or_default()
+        .and_then(|v| {
+            v["frames"]
+                .as_array()
+                .or_else(|| v["packets_and_frames"].as_array())
+                .cloned()
+        })
+        .unwrap_or_default();
+    let packets = entries
         .iter()
+        .filter(|e| e["type"] == "packet")
+        .filter_map(|p| {
+            let key = p["flags"].as_str().is_some_and(|f| f.starts_with('K'));
+            Some((num(&p["pts_time"])?, key))
+        })
+        .collect();
+    let frames = entries
+        .iter()
+        .filter(|e| e["type"].is_null() || e["type"] == "frame")
         .filter_map(|f| {
             let kind = f["media_type"].as_str()?;
             if kind != "video" && kind != "audio" {
@@ -521,7 +552,23 @@ pub fn parse_sample(json: &[u8], stderr: &str) -> SampleOutput {
         .filter(|l| !l.is_empty())
         .map(str::to_string)
         .collect();
-    SampleOutput { frames, errors }
+    SampleOutput {
+        frames,
+        packets,
+        errors,
+    }
+}
+
+/// Packets that follow a keyframe in decode order but are shown before it
+/// are leading pictures of an open GOP (HEVC CRA/RASL, x265's default).
+pub fn has_open_gop(packets: &[(f64, bool)]) -> bool {
+    packets.iter().enumerate().any(|(i, &(key_pts, key))| {
+        key && packets[i + 1..]
+            .iter()
+            .take_while(|(_, k)| !k)
+            .take(32)
+            .any(|&(pts, _)| pts < key_pts - 1e-6)
+    })
 }
 
 /// Decoder messages that appear right after seeking into a stream (leading
@@ -733,6 +780,7 @@ mod tests {
             .collect();
         let out = SampleOutput {
             frames: frames(&video, &audio),
+            packets: vec![],
             errors: vec!["[hevc @ 0x1] Could not find ref with POC 12".into()],
         };
         assert!(analyze_sample(&out, 100.0, Some(0), Some(1)).is_empty());
@@ -745,6 +793,7 @@ mod tests {
                 &[10.0, 10.04, 10.08, 11.2, 11.24],
                 &[(10.0, 0.032), (10.032, 0.032), (10.5, 0.032)],
             ),
+            packets: vec![],
             errors: vec!["[h264 @ 0x55d] error while decoding MB 3 4, bytestream -5".into()],
         };
         let f = analyze_sample(&out, 10.0, Some(0), Some(1));
@@ -769,6 +818,7 @@ mod tests {
 
         let back = SampleOutput {
             frames: frames(&[5.0, 5.04, 4.0], &[(5.0, 0.03), (4.9, 0.03)]),
+            packets: vec![],
             errors: vec![],
         };
         let f = analyze_sample(&back, 5.0, Some(0), Some(1));
@@ -823,6 +873,41 @@ mod tests {
             layout_index_at_end(&boxes(&[("ftyp", 32), ("mdat", 0)])),
             None
         );
+    }
+
+    #[test]
+    fn open_gop_from_packet_order() {
+        // Closed: B-frames after the keyframe are shown after it.
+        let closed = [
+            (0.0, true),
+            (0.16, false),
+            (0.04, false),
+            (0.08, false),
+            (2.0, true),
+            (2.12, false),
+            (2.04, false),
+        ];
+        assert!(!has_open_gop(&closed));
+        // Open: leading pictures of the second keyframe are shown before it.
+        let open = [
+            (0.0, true),
+            (0.16, false),
+            (0.04, false),
+            (2.0, true),
+            (1.92, false),
+            (1.96, false),
+            (2.04, false),
+        ];
+        assert!(has_open_gop(&open));
+
+        let json = br#"{"packets_and_frames": [
+          {"type": "packet", "pts_time": "2.000000", "flags": "K__"},
+          {"type": "packet", "pts_time": "1.958000", "flags": "___"},
+          {"type": "frame", "media_type": "video", "stream_index": 0, "best_effort_timestamp_time": "1.958000"}
+        ]}"#;
+        let s = parse_sample(json, "");
+        assert_eq!(s.packets, [(2.0, true), (1.958, false)]);
+        assert_eq!(s.frames.len(), 1);
     }
 
     #[test]

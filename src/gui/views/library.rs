@@ -1306,7 +1306,7 @@ fn health_details(ui: &mut egui::Ui, e: &LibraryEntry) {
     }
     if !h.risks.is_empty() {
         ui.label(
-            RichText::new(tr!("ℹ = the TV probably cannot play this directly; the server converts on the fly, which can stall on weak servers or Wi-Fi. Adjust the device in the settings."))
+            RichText::new(tr!("ℹ = deviates from the most compatible format: not every TV plays it directly, the server converts on the fly, which can stall on weak servers or Wi-Fi."))
                 .small()
                 .color(theme::MUTED),
         );

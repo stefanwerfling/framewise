@@ -68,6 +68,10 @@ pub struct VideoSettings {
     pub hevc_10bit: bool,
     /// Optional x264 tune (film, animation, grain …).
     pub tune: Option<String>,
+    /// Peak video bitrate in Mbit/s (0 = unlimited). Every Fire TV, the
+    /// plain 1080p stick included, plays 20 Mbit/s; higher streams are
+    /// re-encoded and the encoder is capped (VBV) to this rate.
+    pub max_bitrate_mbps: u32,
 }
 
 impl Default for VideoSettings {
@@ -86,6 +90,7 @@ impl Default for VideoSettings {
             auto_crop: true,
             hevc_10bit: true,
             tune: None,
+            max_bitrate_mbps: 20,
         }
     }
 }

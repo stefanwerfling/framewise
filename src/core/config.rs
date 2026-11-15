@@ -272,26 +272,12 @@ impl JellyfinSettings {
     }
 }
 
-/// What the playback device plays directly (stage 1 of the health check)
-/// and how thorough the quick check is (stage 2). Defaults describe a
-/// typical Android TV / Fire TV with the Jellyfin app and are conservative:
-/// everything else may make the server convert on the fly.
+/// Thoroughness of the quick check (stage 2 of the health check). Stage 1
+/// needs no settings: it measures against the most compatible format.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HealthSettings {
-    pub hevc: bool,
-    pub av1: bool,
-    /// Dolby Vision decoding (otherwise profile 5 cannot be shown correctly).
-    pub dolby_vision: bool,
-    /// DTS / TrueHD play directly (decoder or passthrough to a receiver).
-    pub dts: bool,
-    pub truehd: bool,
-    /// PGS/VobSub and ASS subtitles are shown without burning them in.
-    pub image_subtitles: bool,
-    pub ass_subtitles: bool,
-    pub max_height: u32,
-    pub max_bitrate_mbps: u32,
-    /// Quick check: samples per file and their length.
+    /// Samples per file and their length.
     pub samples: u32,
     pub sample_seconds: u32,
     /// Files checked at the same time.
@@ -301,15 +287,6 @@ pub struct HealthSettings {
 impl Default for HealthSettings {
     fn default() -> Self {
         Self {
-            hevc: true,
-            av1: false,
-            dolby_vision: false,
-            dts: false,
-            truehd: false,
-            image_subtitles: false,
-            ass_subtitles: false,
-            max_height: 2160,
-            max_bitrate_mbps: 80,
             samples: 6,
             sample_seconds: 3,
             parallel: 2,
