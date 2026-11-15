@@ -447,3 +447,7 @@ statt fest im Profil zu stehen.
   - Profil-Einstellung „Maximale Video-Bitrate“ (Standard 20 Mbit/s): höhere Quellen werden
     neu kodiert, x264/x265/NVENC werden per VBV (`-maxrate`/`-bufsize`) gedeckelt.
 - Kompatibilität „teilweise“ statt „kompatibel“ bei zu hoher Bitrate oder variabler Bildrate.
+- Warteschlange: Knopf „Unterbrochene neu starten“ reiht alle Jobs, die beim Beenden oder
+  Absturz liefen, mit einem Klick wieder ein (sie beginnen von vorn).
+- Bibliothek per Tastatur: ↑/↓, Bild↑/↓, Pos1/Ende bewegen die Zeile (Details rechts), die
+  Leertaste wählt aus oder ab, Esc schließt die Details. Nicht, während ein Textfeld aktiv ist.

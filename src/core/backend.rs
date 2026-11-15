@@ -528,6 +528,24 @@ impl Backend {
                     self.emit(AppEvent::JobUpdated(Box::new(j)));
                 }
             }
+            Command::RetryInterrupted => {
+                let mut n = 0;
+                for i in 0..self.jobs.len() {
+                    if self.jobs[i].state == JobState::Interrupted {
+                        self.jobs[i].reset_for_retry();
+                        let j = self.jobs[i].clone();
+                        self.save_job(&j);
+                        self.emit(AppEvent::JobUpdated(Box::new(j)));
+                        n += 1;
+                    }
+                }
+                if n > 0 {
+                    self.notice(
+                        NoticeLevel::Info,
+                        trf!("{} interrupted job(s) queued again", n),
+                    );
+                }
+            }
             Command::RemoveJob(id) => {
                 if let Some(pos) = self
                     .jobs

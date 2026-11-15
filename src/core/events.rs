@@ -89,6 +89,8 @@ pub enum Command {
     ResumeJob(JobId),
     CancelJob(JobId),
     RetryJob(JobId),
+    /// Queue every interrupted job again (after a restart or crash).
+    RetryInterrupted,
     RemoveJob(JobId),
     SetJobPriority(JobId, i32),
     ClearFinished,

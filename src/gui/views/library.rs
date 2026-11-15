@@ -403,6 +403,9 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
             rows.len(),
             lib.len(),
             n_sel
+        ))
+        .on_hover_text(tr!(
+            "Keyboard: ↑/↓, Page Up/Down, Home/End move through the list, space selects or unselects, Esc closes the details"
         ));
         if ui.button(tr!("Select shown")).clicked() {
             for &i in &rows {
@@ -494,6 +497,9 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
             });
     }
 
+    // ---- keyboard: arrows move the cursor row, space toggles its selection
+    let scroll_to = keyboard(ui, &mut app.library_ui, &lib, &rows);
+
     // ---- table
     let state = &mut app.library_ui;
     let text_height = egui::TextStyle::Body.resolve(ui.style()).size + 6.0;
@@ -503,7 +509,11 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
     egui::ScrollArea::horizontal().show(ui, |ui| {
         // selectable labels would swallow the row click
         ui.style_mut().interaction.selectable_labels = false;
-        TableBuilder::new(ui)
+        let mut table = TableBuilder::new(ui);
+        if let Some(i) = scroll_to {
+            table = table.scroll_to_row(i, None);
+        }
+        table
             .striped(true)
             .resizable(true)
             .sense(egui::Sense::click())
@@ -707,6 +717,66 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
             app.library_ui.focus = Some(p);
         }
     }
+}
+
+/// Arrow keys, Page Up/Down, Home/End move the cursor row (the row whose
+/// details are shown), space toggles its selection, Escape closes the
+/// details. Ignored while a text field has the keyboard. Returns the row to
+/// scroll to.
+fn keyboard(
+    ui: &egui::Ui,
+    state: &mut LibraryUi,
+    lib: &[LibraryEntry],
+    rows: &[usize],
+) -> Option<usize> {
+    if rows.is_empty() || ui.ctx().egui_wants_keyboard_input() {
+        return None;
+    }
+    use egui::{Key, Modifiers};
+    const PAGE: usize = 20;
+    let (down, up, page_down, page_up, home, end, space, escape) = ui.input_mut(|i| {
+        let mut take = |k| i.consume_key(Modifiers::NONE, k);
+        (
+            take(Key::ArrowDown),
+            take(Key::ArrowUp),
+            take(Key::PageDown),
+            take(Key::PageUp),
+            take(Key::Home),
+            take(Key::End),
+            take(Key::Space),
+            take(Key::Escape),
+        )
+    });
+    if !(down || up || page_down || page_up || home || end || space || escape) {
+        return None;
+    }
+    if escape {
+        state.focus = None;
+        return None;
+    }
+    // Only on a key press: finding the cursor walks the shown rows.
+    let current = state
+        .focus
+        .as_ref()
+        .and_then(|f| rows.iter().position(|&i| &lib[i].media.absolute_path == f));
+    let last = rows.len() - 1;
+    let target = match current {
+        _ if home => 0,
+        _ if end => last,
+        None if space => return None,
+        None => 0,
+        Some(c) if down => (c + 1).min(last),
+        Some(c) if up => c.saturating_sub(1),
+        Some(c) if page_down => (c + PAGE).min(last),
+        Some(c) if page_up => c.saturating_sub(PAGE),
+        Some(c) => c,
+    };
+    let path = &lib[rows[target]].media.absolute_path;
+    if space && !state.selected.remove(path) {
+        state.selected.insert(path.clone());
+    }
+    state.focus = Some(path.clone());
+    Some(target)
 }
 
 fn kv(ui: &mut egui::Ui, k: &str, v: impl Into<String>) {

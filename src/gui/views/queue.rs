@@ -42,6 +42,22 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
         } else if ui.button(tr!("⏸ Pause queue")).clicked() {
             app.send(Command::SetQueuePaused(true));
         }
+        let interrupted = app
+            .snap
+            .jobs
+            .iter()
+            .filter(|j| j.state == JobState::Interrupted)
+            .count();
+        if interrupted > 0
+            && ui
+                .button(trf!("↻ Restart interrupted ({})", interrupted))
+                .on_hover_text(tr!(
+                    "Queue all interrupted jobs again – they start from the beginning"
+                ))
+                .clicked()
+        {
+            app.send(Command::RetryInterrupted);
+        }
         if ui.button(tr!("Remove finished")).clicked() {
             app.send(Command::ClearFinished);
         }
