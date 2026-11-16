@@ -606,4 +606,7 @@
 "↻ Restart interrupted ({})" = "↻ Unterbrochene neu starten ({})"
 "Queue all interrupted jobs again – they start from the beginning" = "Alle unterbrochenen Jobs wieder einreihen – sie beginnen von vorn"
 "{} interrupted job(s) queued again" = "{} unterbrochene(r) Job(s) wieder eingereiht"
-"Keyboard: ↑/↓, Page Up/Down, Home/End move through the list, space selects or unselects, Esc closes the details" = "Tastatur: ↑/↓, Bild↑/Bild↓, Pos1/Ende bewegen durch die Liste, Leertaste wählt aus oder ab, Esc schließt die Details"
+"Keyboard: ↑/↓, Page Up/Down, Home/End move through the list, space selects or unselects, Ctrl+A selects all shown, Esc closes the details" = "Tastatur: ↑/↓, Bild↑/Bild↓, Pos1/Ende bewegen durch die Liste, Leertaste wählt aus oder ab, Strg+A wählt alle angezeigten aus, Esc schließt die Details"
+"Ctrl+A" = "Strg+A"
+"{} cannot be encoded with the current settings" = "{} lässt sich mit den aktuellen Einstellungen nicht kodieren"
+"Encode again with the current settings – the existing result is replaced once the new file has been validated" = "Mit den aktuellen Einstellungen neu kodieren – das vorhandene Ergebnis wird erst ersetzt, wenn die neue Datei geprüft ist"

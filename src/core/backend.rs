@@ -516,18 +516,7 @@ impl Backend {
             Command::PauseJob(id) => self.pause_job(id, true),
             Command::ResumeJob(id) => self.pause_job(id, false),
             Command::CancelJob(id) => self.cancel_job(id),
-            Command::RetryJob(id) => {
-                if let Some(j) = self
-                    .jobs
-                    .iter_mut()
-                    .find(|j| j.id == id && j.state.can_retry())
-                {
-                    j.reset_for_retry();
-                    let j = j.clone();
-                    self.save_job(&j);
-                    self.emit(AppEvent::JobUpdated(Box::new(j)));
-                }
-            }
+            Command::RetryJob(id) => self.retry_job(id),
             Command::RetryInterrupted => {
                 let mut n = 0;
                 for i in 0..self.jobs.len() {
@@ -925,6 +914,51 @@ impl Backend {
             );
         }
         self.emit(AppEvent::JobPreview { profile_id, items });
+    }
+
+    /// Queue a finished, failed, cancelled, interrupted or skipped job again.
+    /// A done job is encoded anew with the current profile and settings; its
+    /// result is replaced only once the new file has been validated.
+    fn retry_job(&mut self, id: JobId) {
+        let Some(pos) = self
+            .jobs
+            .iter()
+            .position(|j| j.id == id && (j.state.can_retry() || j.state == JobState::Done))
+        else {
+            return;
+        };
+        if self.jobs[pos].state == JobState::Done {
+            let job = &self.jobs[pos];
+            let profile = self.profile(&job.profile_id).cloned();
+            let media = self
+                .media
+                .iter()
+                .find(|m| m.absolute_path == job.media.absolute_path)
+                .cloned();
+            if let (Some(profile), Some(m)) = (profile, media) {
+                let mut plan = plan::build_plan(&m, &profile, &self.plan_caps());
+                self.calibration.apply(&m, &mut plan);
+                if plan.is_blocked() {
+                    self.notice(
+                        NoticeLevel::Warning,
+                        trf!(
+                            "{} cannot be encoded with the current settings",
+                            m.display_name()
+                        ),
+                    );
+                    return;
+                }
+                let job = &mut self.jobs[pos];
+                job.media = m;
+                job.plan = plan;
+            }
+            self.jobs[pos].replace_existing = true;
+        }
+        let job = &mut self.jobs[pos];
+        job.reset_for_retry();
+        let job = job.clone();
+        self.save_job(&job);
+        self.emit(AppEvent::JobUpdated(Box::new(job)));
     }
 
     fn add_jobs(&mut self, profile_id: &str, items: Vec<JobRequest>) {

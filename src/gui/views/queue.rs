@@ -308,6 +308,16 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
                         {
                             commands.push(Command::RetryJob(j.id));
                         }
+                        if j.state == JobState::Done
+                            && ui
+                                .small_button("↻")
+                                .on_hover_text(tr!(
+                                    "Encode again with the current settings – the existing result is replaced once the new file has been validated"
+                                ))
+                                .clicked()
+                        {
+                            commands.push(Command::RetryJob(j.id));
+                        }
                         if ui
                             .small_button("🗑")
                             .on_hover_text(tr!("Remove from queue"))

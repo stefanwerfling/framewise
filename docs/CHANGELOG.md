@@ -450,4 +450,7 @@ statt fest im Profil zu stehen.
 - Warteschlange: Knopf „Unterbrochene neu starten“ reiht alle Jobs, die beim Beenden oder
   Absturz liefen, mit einem Klick wieder ein (sie beginnen von vorn).
 - Bibliothek per Tastatur: ↑/↓, Bild↑/↓, Pos1/Ende bewegen die Zeile (Details rechts), die
-  Leertaste wählt aus oder ab, Esc schließt die Details. Nicht, während ein Textfeld aktiv ist.
+  Leertaste wählt aus oder ab, Strg+A wählt alle angezeigten aus, Esc schließt die Details. Nicht, während ein Textfeld aktiv ist.
+- Warteschlange: ↻ auch für fertige Jobs. Sie werden mit dem aktuellen Profil und den aktuellen
+  Einstellungen neu geplant und kodiert; das vorhandene Ergebnis wird erst ersetzt, wenn die neue
+  Datei geprüft ist.

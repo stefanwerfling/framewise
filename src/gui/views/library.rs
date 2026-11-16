@@ -405,9 +405,18 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
             n_sel
         ))
         .on_hover_text(tr!(
-            "Keyboard: ↑/↓, Page Up/Down, Home/End move through the list, space selects or unselects, Esc closes the details"
+            "Keyboard: ↑/↓, Page Up/Down, Home/End move through the list, space selects or unselects, Ctrl+A selects all shown, Esc closes the details"
         ));
-        if ui.button(tr!("Select shown")).clicked() {
+        // Ctrl+A (Cmd+A on macOS) like the button, unless a text field
+        // has the keyboard (there it selects the text).
+        let select_all = !ui.ctx().egui_wants_keyboard_input()
+            && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::A));
+        if ui
+            .button(tr!("Select shown"))
+            .on_hover_text(tr!("Ctrl+A"))
+            .clicked()
+            || select_all
+        {
             for &i in &rows {
                 app.library_ui
                     .selected
