@@ -454,3 +454,8 @@ statt fest im Profil zu stehen.
 - Warteschlange: ↻ auch für fertige Jobs. Sie werden mit dem aktuellen Profil und den aktuellen
   Einstellungen neu geplant und kodiert; das vorhandene Ergebnis wird erst ersetzt, wenn die neue
   Datei geprüft ist.
+- Warteschlange: Knopf „Fehlgeschlagene neu einreihen“ setzt alle fehlgeschlagenen Jobs mit einem
+  Klick zurück auf die Warteliste (sie beginnen von vorn).
+- Verlauf: ↻ je Zeile und Knopf „Angezeigte Fehlschläge neu einreihen“ setzen fehlgeschlagene,
+  abgebrochene oder übersprungene Einträge zurück auf die Warteliste – auch wenn der Job aus der
+  Warteschlange schon entfernt wurde. Ein inzwischen vorhandenes Ziel wird nicht überschrieben.

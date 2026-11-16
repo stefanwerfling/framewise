@@ -43,6 +43,15 @@ pub struct JobRequest {
     pub replace_existing: bool,
 }
 
+/// A failed history entry to put back on the queue.
+#[derive(Debug, Clone)]
+pub struct HistoryRequeue {
+    pub job_id: JobId,
+    pub source: PathBuf,
+    pub target: PathBuf,
+    pub profile_id: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct JobPreviewItem {
     pub source: PathBuf,
@@ -91,6 +100,11 @@ pub enum Command {
     RetryJob(JobId),
     /// Queue every interrupted job again (after a restart or crash).
     RetryInterrupted,
+    /// Put every failed job back on the queue.
+    RetryFailed,
+    /// Put failed history entries back on the queue (the job again if it
+    /// still exists, otherwise a new one for the same source and target).
+    RequeueHistory(Vec<HistoryRequeue>),
     RemoveJob(JobId),
     SetJobPriority(JobId, i32),
     ClearFinished,

@@ -15,7 +15,8 @@ use tokio::sync::mpsc;
 use super::config::{AppConfig, AppDirs, JellyfinSettings, SourceKind};
 use super::desktop_notify;
 use super::events::{
-    AppEvent, Command, JobPreviewItem, JobRequest, Library, LibraryEntry, NoticeLevel,
+    AppEvent, Command, HistoryRequeue, JobPreviewItem, JobRequest, Library, LibraryEntry,
+    NoticeLevel,
 };
 use super::paths::{self, ConflictResolution, Roots};
 use super::tools::{self, ToolInfo, ToolPaths};
@@ -518,16 +519,7 @@ impl Backend {
             Command::CancelJob(id) => self.cancel_job(id),
             Command::RetryJob(id) => self.retry_job(id),
             Command::RetryInterrupted => {
-                let mut n = 0;
-                for i in 0..self.jobs.len() {
-                    if self.jobs[i].state == JobState::Interrupted {
-                        self.jobs[i].reset_for_retry();
-                        let j = self.jobs[i].clone();
-                        self.save_job(&j);
-                        self.emit(AppEvent::JobUpdated(Box::new(j)));
-                        n += 1;
-                    }
-                }
+                let n = self.requeue_all(JobState::Interrupted);
                 if n > 0 {
                     self.notice(
                         NoticeLevel::Info,
@@ -535,6 +527,13 @@ impl Backend {
                     );
                 }
             }
+            Command::RetryFailed => {
+                let n = self.requeue_all(JobState::Failed);
+                if n > 0 {
+                    self.notice(NoticeLevel::Info, trf!("{} failed job(s) queued again", n));
+                }
+            }
+            Command::RequeueHistory(items) => self.requeue_history(items),
             Command::RemoveJob(id) => {
                 if let Some(pos) = self
                     .jobs
@@ -919,6 +918,74 @@ impl Backend {
     /// Queue a finished, failed, cancelled, interrupted or skipped job again.
     /// A done job is encoded anew with the current profile and settings; its
     /// result is replaced only once the new file has been validated.
+    /// Puts every job in `state` back on the queue; returns how many.
+    fn requeue_all(&mut self, state: JobState) -> usize {
+        let mut n = 0;
+        for i in 0..self.jobs.len() {
+            if self.jobs[i].state == state {
+                self.jobs[i].reset_for_retry();
+                let j = self.jobs[i].clone();
+                self.save_job(&j);
+                self.emit(AppEvent::JobUpdated(Box::new(j)));
+                n += 1;
+            }
+        }
+        n
+    }
+
+    fn requeue_history(&mut self, items: Vec<HistoryRequeue>) {
+        let caps = self.plan_caps();
+        let mut reserved = self.reserved_targets();
+        let mut queued = 0;
+        let mut created = false;
+        for item in items {
+            if let Some(pos) = self.jobs.iter().position(|j| j.id == item.job_id) {
+                // Still in the queue: only retry it if it is not queued,
+                // running or done already.
+                if self.jobs[pos].state.can_retry() && !reserved.contains(&self.jobs[pos].target) {
+                    self.jobs[pos].reset_for_retry();
+                    reserved.insert(self.jobs[pos].target.clone());
+                    let j = self.jobs[pos].clone();
+                    self.save_job(&j);
+                    self.emit(AppEvent::JobUpdated(Box::new(j)));
+                    queued += 1;
+                }
+                continue;
+            }
+            if reserved.contains(&item.target) {
+                continue;
+            }
+            let Some(profile) = self.profile(&item.profile_id).cloned() else {
+                continue;
+            };
+            let Some(m) = self.media.iter().find(|m| m.absolute_path == item.source) else {
+                continue;
+            };
+            let mut plan = plan::build_plan(m, &profile, &caps);
+            self.calibration.apply(m, &mut plan);
+            if plan.is_blocked() {
+                continue;
+            }
+            // replace_existing stays off: should the target exist by now, the
+            // job is skipped instead of overwriting it.
+            let job = Job::new(self.next_job_id, m.clone(), item.target, profile.id, plan);
+            self.next_job_id += 1;
+            reserved.insert(job.target.clone());
+            self.save_job(&job);
+            self.jobs.push(job);
+            created = true;
+            queued += 1;
+        }
+        if created {
+            self.send_jobs();
+            self.publish_library();
+        }
+        self.notice(
+            NoticeLevel::Info,
+            trf!("{} failed job(s) queued again", queued),
+        );
+    }
+
     fn retry_job(&mut self, id: JobId) {
         let Some(pos) = self
             .jobs

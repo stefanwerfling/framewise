@@ -58,6 +58,22 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
         {
             app.send(Command::RetryInterrupted);
         }
+        let failed = app
+            .snap
+            .jobs
+            .iter()
+            .filter(|j| j.state == JobState::Failed)
+            .count();
+        if failed > 0
+            && ui
+                .button(trf!("↻ Requeue failed ({})", failed))
+                .on_hover_text(tr!(
+                    "Put all failed jobs back on the queue – they start from the beginning"
+                ))
+                .clicked()
+        {
+            app.send(Command::RetryFailed);
+        }
         if ui.button(tr!("Remove finished")).clicked() {
             app.send(Command::ClearFinished);
         }

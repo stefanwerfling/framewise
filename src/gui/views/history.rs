@@ -3,8 +3,11 @@
 use eframe::egui::{self, RichText};
 use egui_extras::{Column, TableBuilder};
 
+use std::collections::HashSet;
+
+use crate::core::events::{Command, HistoryRequeue};
 use crate::gui::{FramewiseApp, format, theme};
-use crate::queue::job::JobState;
+use crate::queue::job::{HistoryEntry, JobId, JobState};
 use crate::{tr, trf};
 
 #[derive(Default)]
@@ -39,7 +42,6 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
         );
         ui.checkbox(&mut app.history_ui.only_failed, tr!("Only failed"));
     });
-    ui.separator();
 
     let needle = app.history_ui.search.to_lowercase();
     let rows: Vec<_> = app
@@ -52,11 +54,59 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
         })
         .collect();
 
+    // Failures that can go back on the queue: not done since, and the job is
+    // not waiting or running already.
+    let busy: HashSet<JobId> = app
+        .snap
+        .jobs
+        .iter()
+        .filter(|j| !j.state.can_retry())
+        .map(|j| j.id)
+        .collect();
+    let history = &app.snap.history;
+    let requeueable = |h: &HistoryEntry| {
+        h.state != JobState::Done
+            && !busy.contains(&h.job_id)
+            && !history.iter().any(|o| {
+                o.job_id == h.job_id
+                    && o.state == JobState::Done
+                    && o.finished_unix >= h.finished_unix
+            })
+    };
+    let to_request = |h: &HistoryEntry| HistoryRequeue {
+        job_id: h.job_id,
+        source: h.source.clone(),
+        target: h.target.clone(),
+        profile_id: h.profile_id.clone(),
+    };
+    let mut seen = HashSet::new();
+    let shown_failed: Vec<HistoryRequeue> = rows
+        .iter()
+        .filter(|h| requeueable(h) && seen.insert(h.job_id))
+        .map(|h| to_request(h))
+        .collect();
+    let mut requeue: Option<Vec<HistoryRequeue>> = None;
+    if !shown_failed.is_empty() {
+        ui.horizontal(|ui| {
+            if ui
+                .button(trf!("↻ Requeue shown failures ({})", shown_failed.len()))
+                .on_hover_text(tr!(
+                    "Put the failed entries shown below back on the queue – they start from the beginning"
+                ))
+                .clicked()
+            {
+                requeue = Some(shown_failed.clone());
+            }
+        });
+    }
+    ui.separator();
+
     let profiles = &app.snap.profiles;
     TableBuilder::new(ui)
         .striped(true)
         .resizable(true)
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+        .column(Column::exact(24.0))
         .column(Column::initial(120.0))
         .column(Column::initial(260.0).clip(true))
         .column(Column::initial(80.0))
@@ -68,6 +118,7 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
         .column(Column::initial(130.0))
         .column(Column::remainder().at_least(100.0))
         .header(22.0, |mut h| {
+            h.col(|_| {});
             for t in [
                 tr!("Finished"),
                 tr!("File"),
@@ -88,6 +139,16 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
         .body(|body| {
             body.rows(22.0, rows.len(), |mut row| {
                 let h = rows[row.index()];
+                row.col(|ui| {
+                    if requeueable(h)
+                        && ui
+                            .small_button("↻")
+                            .on_hover_text(tr!("Put back on the queue"))
+                            .clicked()
+                    {
+                        requeue = Some(vec![to_request(h)]);
+                    }
+                });
                 row.col(|ui| {
                     ui.label(RichText::new(format::timestamp(h.finished_unix)).small());
                 });
@@ -175,4 +236,7 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
                 });
             });
         });
+    if let Some(items) = requeue {
+        app.send(Command::RequeueHistory(items));
+    }
 }
