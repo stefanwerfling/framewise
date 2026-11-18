@@ -150,6 +150,8 @@ pub enum AppEvent {
     Notice {
         level: NoticeLevel,
         text: String,
+        /// Job the notice is about; the GUI offers to retry it from there.
+        job: Option<JobId>,
     },
     /// Result of [`Command::TestJellyfin`].
     Jellyfin(Result<ServerInfo, String>),

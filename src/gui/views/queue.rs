@@ -14,6 +14,8 @@ use crate::{tr, trf};
 pub struct QueueUi {
     pub focus: Option<JobId>,
     pub hide_finished: bool,
+    /// Running job whose cancellation awaits confirmation.
+    pub confirm_cancel: Option<JobId>,
 }
 
 fn state_color(s: JobState) -> egui::Color32 {
@@ -158,6 +160,7 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
 
     let mut commands: Vec<Command> = Vec::new();
     let mut focus = app.queue_ui.focus;
+    let mut confirm_cancel = app.queue_ui.confirm_cancel;
     let row_h = 26.0;
     // selectable labels would swallow the row click
     ui.style_mut().interaction.selectable_labels = false;
@@ -298,7 +301,8 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
                             }
                         }
                         if ui.small_button("✖").on_hover_text(tr!("Cancel")).clicked() {
-                            commands.push(Command::CancelJob(j.id));
+                            // the work done so far would be lost: ask first
+                            confirm_cancel = Some(j.id);
                         }
                     } else {
                         if matches!(j.state, JobState::Queued | JobState::Interrupted) {
@@ -355,8 +359,53 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
         });
     });
     app.queue_ui.focus = focus;
+    app.queue_ui.confirm_cancel = confirm_cancel;
+    confirm_cancel_dialog(app, ui.ctx(), &mut commands);
     for c in commands {
         app.send(c);
+    }
+}
+
+/// Asks before a running job is cancelled; a job that has finished in the
+/// meantime closes the dialog on its own.
+fn confirm_cancel_dialog(app: &mut FramewiseApp, ctx: &egui::Context, commands: &mut Vec<Command>) {
+    let Some(id) = app.queue_ui.confirm_cancel else {
+        return;
+    };
+    let Some(job) = app
+        .snap
+        .jobs
+        .iter()
+        .find(|j| j.id == id && j.state.is_active())
+    else {
+        app.queue_ui.confirm_cancel = None;
+        return;
+    };
+    let mut close = false;
+    let response = egui::Modal::new(egui::Id::unique("confirm_cancel_job")).show(ctx, |ui| {
+        ui.set_max_width(460.0);
+        ui.heading(tr!("Cancel job?"));
+        ui.label(RichText::new(&job.media.file_name).strong());
+        ui.label(trf!(
+            "The job has been running for {}. This work is lost; a retry starts from the beginning.",
+            format::duration(job.elapsed_s().map(|s| s as f64))
+        ));
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui
+                .button(RichText::new(tr!("Cancel job")).color(theme::ERROR))
+                .clicked()
+            {
+                commands.push(Command::CancelJob(id));
+                close = true;
+            }
+            if ui.button(RichText::new(tr!("Keep running")).strong()).clicked() {
+                close = true;
+            }
+        });
+    });
+    if close || response.should_close() {
+        app.queue_ui.confirm_cancel = None;
     }
 }
 

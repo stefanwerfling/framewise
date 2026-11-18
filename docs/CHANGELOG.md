@@ -463,3 +463,8 @@ statt fest im Profil zu stehen.
   übersprungene) und lassen sich dort neu einreihen – auch nach „Beendete entfernen“.
 - Warteschlange: beendete Jobs stehen nach Zeitpunkt sortiert (neueste zuerst), unabhängig von der
   Priorität; ein gerade abgebrochener Job erscheint so direkt unter den wartenden.
+- Warteschlange: ✖ bei einem laufenden Job fragt erst nach („Job abbrechen?“ mit bisheriger
+  Laufzeit), denn die Arbeit geht verloren. Wartende Jobs werden weiter ohne Rückfrage abgebrochen.
+- Abgebrochene Jobs melden sich in der Statusleiste („Job abgebrochen: …“). Bei dieser Meldung und
+  bei „Job fehlgeschlagen“ setzt ein ↻ den Job direkt wieder auf die Warteliste, solange er noch in
+  der Warteschlange steht.

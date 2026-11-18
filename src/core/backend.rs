@@ -222,6 +222,15 @@ impl Backend {
         self.emit(AppEvent::Notice {
             level,
             text: text.into(),
+            job: None,
+        });
+    }
+
+    fn job_notice(&self, level: NoticeLevel, text: impl Into<String>, job: JobId) {
+        self.emit(AppEvent::Notice {
+            level,
+            text: text.into(),
+            job: Some(job),
         });
     }
 
@@ -1110,6 +1119,11 @@ impl Backend {
             if let Err(e) = self.db.add_history(&HistoryEntry::from_job(&j)) {
                 tracing::error!("history insert failed: {e}");
             }
+            self.job_notice(
+                NoticeLevel::Info,
+                trf!("Job cancelled: {}", j.media.file_name),
+                j.id,
+            );
             self.emit(AppEvent::JobUpdated(Box::new(j)));
             self.publish_library();
             self.send_history();
@@ -1283,13 +1297,19 @@ impl Backend {
             tracing::error!("history insert failed: {e}");
         }
         match job.state {
-            JobState::Failed => self.notice(
+            JobState::Failed => self.job_notice(
                 NoticeLevel::Error,
                 trf!(
                     "Job failed: {} – {}",
                     job.media.file_name,
                     job.error.clone().unwrap_or_default()
                 ),
+                job.id,
+            ),
+            JobState::Cancelled => self.job_notice(
+                NoticeLevel::Info,
+                trf!("Job cancelled: {}", job.media.file_name),
+                job.id,
             ),
             JobState::Done => self.notice(
                 NoticeLevel::Info,

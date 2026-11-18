@@ -22,7 +22,7 @@ use crate::core::tools::ToolInfo;
 use crate::encoding::hardware::HardwareCaps;
 use crate::encoding::profile::EncodingProfile;
 use crate::monitor::{GateBlock, ResourceSnapshot};
-use crate::queue::job::{HistoryEntry, Job, JobState};
+use crate::queue::job::{HistoryEntry, Job, JobId, JobState};
 use crate::scanner::{DuplicateGroup, ScanIssue, ScanProgress};
 use crate::{i18n, tr};
 
@@ -65,6 +65,8 @@ pub struct Notice {
     pub level: NoticeLevel,
     pub text: String,
     pub at: Instant,
+    /// Job the notice is about (offers a retry while it can be retried).
+    pub job: Option<JobId>,
 }
 
 /// Summary of the last scan.
@@ -148,10 +150,15 @@ impl FramewiseApp {
     }
 
     pub fn notify(&mut self, level: NoticeLevel, text: impl Into<String>) {
+        self.push_notice(level, text.into(), None);
+    }
+
+    fn push_notice(&mut self, level: NoticeLevel, text: String, job: Option<JobId>) {
         self.notices.push_back(Notice {
             level,
-            text: text.into(),
+            text,
             at: Instant::now(),
+            job,
         });
         while self.notices.len() > 50 {
             self.notices.pop_front();
@@ -260,7 +267,7 @@ impl FramewiseApp {
                         confirm_replace: false,
                     });
                 }
-                AppEvent::Notice { level, text } => self.notify(level, text),
+                AppEvent::Notice { level, text, job } => self.push_notice(level, text, job),
                 AppEvent::Jellyfin(result) => self.settings_ui.on_jellyfin(result),
                 AppEvent::QuickConnect(event) => self.settings_ui.on_quick_connect(event),
                 AppEvent::HealthProgress(p) => self.snap.health_progress = p,
@@ -420,6 +427,23 @@ impl FramewiseApp {
                     NoticeLevel::Error => theme::ERROR,
                 };
                 if n.at.elapsed() < Duration::from_secs(30) || n.level == NoticeLevel::Error {
+                    // offered only while the job is still there and retryable
+                    let retry = n.job.filter(|id| {
+                        self.snap
+                            .jobs
+                            .iter()
+                            .any(|j| j.id == *id && j.state.can_retry())
+                    });
+                    if let Some(id) = retry
+                        && ui
+                            .small_button("↻")
+                            .on_hover_text(tr!(
+                                "Put the job back on the queue – it starts from the beginning"
+                            ))
+                            .clicked()
+                    {
+                        self.send(Command::RetryJob(id));
+                    }
                     ui.label(egui::RichText::new(&n.text).small().color(color))
                         .on_hover_text(&n.text);
                 }
