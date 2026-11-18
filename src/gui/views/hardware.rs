@@ -22,7 +22,7 @@ fn bar(ui: &mut egui::Ui, label: &str, fraction: f32, text: String) {
             egui::ProgressBar::new(fraction.clamp(0.0, 1.0))
                 .desired_width(320.0)
                 .fill(color)
-                .text(RichText::new(text).color(egui::Color32::WHITE)),
+                .text(RichText::new(text).color(theme::TEXT_STRONG)),
         );
     });
 }
@@ -33,7 +33,7 @@ fn sparkline(ui: &mut egui::Ui, values: &[f32]) {
         egui::Sense::hover(),
     );
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 3.0, egui::Color32::from_rgb(18, 19, 22));
+    painter.rect_filled(rect, 3.0, theme::SUNKEN);
     if values.len() < 2 {
         return;
     }
@@ -55,19 +55,22 @@ fn sparkline(ui: &mut egui::Ui, values: &[f32]) {
 }
 
 pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.heading(tr!("Hardware monitor"));
-        if ui.button(tr!("⟳ Re-detect hardware")).clicked() {
-            app.send(Command::RescanHardware);
-        }
-    });
-    ui.separator();
+    theme::page_header(
+        ui,
+        tr!("Hardware monitor"),
+        Some(tr!("Utilisation, encoders and resource limits")),
+        |ui| {
+            if ui.button(tr!("⟳ Re-detect hardware")).clicked() {
+                app.send(Command::RescanHardware);
+            }
+        },
+    );
     egui::ScrollArea::vertical().show(ui, |ui| {
         ui.columns(2, |cols| {
             let ui = &mut cols[0];
             let r = &app.snap.resources;
             theme::card().show(ui, |ui| {
-                ui.label(RichText::new(tr!("Live usage")).strong());
+                theme::section_title(ui, tr!("Live usage"));
                 ui.label(RichText::new(&r.cpu_brand).small().color(theme::MUTED));
                 bar(ui, "CPU", r.cpu_percent / 100.0, format!("{:.0} %", r.cpu_percent));
                 let history: Vec<f32> = app.snap.cpu_history.iter().copied().collect();
@@ -127,7 +130,7 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
                 }
             });
             theme::card().show(ui, |ui| {
-                ui.label(RichText::new(tr!("Disks")).strong());
+                theme::section_title(ui, tr!("Disks"));
                 for d in r.disks.iter().filter(|d| d.total > 0) {
                     let used = d.total.saturating_sub(d.available);
                     bar(
@@ -148,7 +151,7 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
 
             let ui = &mut cols[1];
             theme::card().show(ui, |ui| {
-                ui.label(RichText::new(tr!("FFmpeg")).strong());
+                theme::section_title(ui, tr!("FFmpeg"));
                 match &app.snap.tools {
                     Some(t) => {
                         ui.label(t.ffmpeg_version.clone().or(t.ffmpeg_error.clone()).unwrap_or_default());
@@ -160,7 +163,7 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
                 }
             });
             theme::card().show(ui, |ui| {
-                ui.label(RichText::new(tr!("Capabilities")).strong());
+                theme::section_title(ui, tr!("Capabilities"));
                 let Some(caps) = app.snap.caps.clone() else {
                     ui.horizontal(|ui| {
                         ui.spinner();
@@ -224,7 +227,7 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
                 });
             });
             theme::card().show(ui, |ui| {
-                ui.label(RichText::new(tr!("Limits")).strong());
+                theme::section_title(ui, tr!("Limits"));
                 ui.label(RichText::new(tr!("A GPU usage limit is not offered because it cannot be enforced reliably. CPU load is a target value: new jobs are delayed while it is exceeded; running ffmpeg processes get a lower priority (nice).")).small().color(theme::MUTED));
             });
         });

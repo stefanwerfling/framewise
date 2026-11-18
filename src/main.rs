@@ -9,7 +9,7 @@ use framewise::core::backend;
 use framewise::core::config::{AppConfig, AppDirs};
 use framewise::core::logging;
 use framewise::gui::FramewiseApp;
-use framewise::i18n::{self, Language};
+use framewise::i18n;
 use framewise::persistence::Database;
 
 fn main() -> eframe::Result {
@@ -26,7 +26,8 @@ fn main() -> eframe::Result {
             AppConfig::default()
         }
     };
-    i18n::set_language(config.ui.language.unwrap_or_else(Language::from_env));
+    // English unless the user picked another language
+    i18n::set_language(config.ui.language.unwrap_or_default());
 
     let db = match Database::open(&dirs.database_file()) {
         Ok(db) => db,

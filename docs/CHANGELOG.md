@@ -468,3 +468,10 @@ statt fest im Profil zu stehen.
 - Abgebrochene Jobs melden sich in der Statusleiste („Job abgebrochen: …“). Bei dieser Meldung und
   bei „Job fehlgeschlagen“ setzt ein ↻ den Job direkt wieder auf die Warteliste, solange er noch in
   der Warteschlange steht.
+- Sprache: Standard ist jetzt Englisch (statt der Systemsprache), Deutsch ist wählbar. Ein
+  EN/DE-Umschalter unten in der Seitenleiste wechselt sofort und speichert die Wahl; in den
+  Einstellungen gilt die Auswahl ebenfalls sofort.
+- Oberfläche überarbeitet: geschichtete dunkle Flächen, größere Schrift und Abstände, Seitenleiste
+  mit Logo, Symbolen und Zähler, Seitenköpfe mit Kurzbeschreibung, einheitliche Kartentitel,
+  Statusplaketten (Warteschlange, Dashboard, Verlauf), hervorgehobene Hauptaktionen,
+  CPU/RAM/GPU-Balken in der Statusleiste, Dashboard-Kacheln über die volle Breite.

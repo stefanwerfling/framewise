@@ -10,19 +10,6 @@ use crate::queue::job::JobState;
 use crate::scanner::ScanProgress;
 use crate::{tr, trf};
 
-fn tile(ui: &mut egui::Ui, title: &str, value: String, hint: Option<&str>, color: egui::Color32) {
-    theme::card().show(ui, |ui| {
-        ui.set_min_size(egui::vec2(170.0, 64.0));
-        ui.vertical(|ui| {
-            ui.label(RichText::new(title).color(theme::MUTED).small());
-            ui.label(RichText::new(value).size(22.0).strong().color(color));
-            if let Some(h) = hint {
-                ui.label(RichText::new(h).small().color(theme::MUTED));
-            }
-        });
-    });
-}
-
 pub fn scan_progress_label(ui: &mut egui::Ui, p: &ScanProgress) {
     let text = match p {
         ScanProgress::Discovering => tr!("Searching files…").to_string(),
@@ -59,10 +46,11 @@ pub fn scan_controls(app: &mut FramewiseApp, ui: &mut egui::Ui) {
             } else {
                 cfg.source_dir.is_some() && cfg.target_dir.is_some()
             };
-            let resp = ui.add_enabled(
-                ready,
-                egui::Button::new(RichText::new(tr!("⟳ Scan source")).strong()),
-            );
+            let resp = if ready {
+                ui.add(theme::primary_button(tr!("⟳ Scan source")))
+            } else {
+                ui.add_enabled(false, egui::Button::new(tr!("⟳ Scan source")))
+            };
             if resp.clicked() {
                 app.send(Command::StartScan);
             }
@@ -102,10 +90,24 @@ pub fn scan_controls(app: &mut FramewiseApp, ui: &mut egui::Ui) {
     });
 }
 
+fn rec_color(rec: Recommendation) -> egui::Color32 {
+    match rec {
+        Recommendation::Transcode => theme::ACCENT,
+        Recommendation::Remux => theme::HDR,
+        Recommendation::AlreadyOptimal => theme::OK,
+        Recommendation::Review => theme::WARN,
+    }
+}
+
 pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
-    ui.heading(tr!("Dashboard"));
+    theme::page_header(
+        ui,
+        tr!("Dashboard"),
+        Some(tr!("Overview of your library and the queue")),
+        |_| {},
+    );
     scan_controls(app, ui);
-    ui.add_space(8.0);
+    ui.add_space(10.0);
 
     let lib = app.snap.library.clone();
     let total_size: u64 = lib.iter().map(|e| e.media.size_bytes).sum();
@@ -124,21 +126,21 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
         .library
         .iter()
         .find_map(|e| e.analysis.calibrated_from);
-    let optimized: u64 = app
+    let done = || {
+        app.snap
+            .history
+            .iter()
+            .filter(|h| h.state == JobState::Done)
+    };
+    let optimized: u64 = done().filter_map(|h| h.result_size).sum();
+    let optimized_src: u64 = done().map(|h| h.source_size).sum();
+    let done_hist = done().count();
+    let waiting = app
         .snap
-        .history
+        .jobs
         .iter()
-        .filter(|h| h.state == JobState::Done)
-        .filter_map(|h| h.result_size)
-        .sum();
-    let optimized_src: u64 = app
-        .snap
-        .history
-        .iter()
-        .filter(|h| h.state == JobState::Done)
-        .map(|h| h.source_size)
-        .sum();
-    let count = |s: JobState| app.snap.jobs.iter().filter(|j| j.state == s).count();
+        .filter(|j| j.state == JobState::Queued)
+        .count();
     let active = app.snap.jobs.iter().filter(|j| j.state.is_active()).count();
     let failed_hist = app
         .snap
@@ -146,108 +148,123 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
         .iter()
         .filter(|h| h.state == JobState::Failed)
         .count();
-    let done_hist = app
-        .snap
-        .history
-        .iter()
-        .filter(|h| h.state == JobState::Done)
-        .count();
 
-    ui.horizontal_wrapped(|ui| {
-        tile(
-            ui,
+    let savings_hint = match calibrated {
+        Some(n) => trf!("estimate, calibrated with {} jobs", n),
+        None => tr!("estimate, not guaranteed").to_string(),
+    };
+    let optimized_hint = trf!("from {}", format::bytes(optimized_src));
+    let tiles: [(&str, String, Option<&str>, egui::Color32); 8] = [
+        (
             tr!("Videos found"),
             lib.len().to_string(),
             None,
-            theme::ACCENT,
-        );
-        tile(
-            ui,
+            theme::TEXT_STRONG,
+        ),
+        (
             tr!("Total source size"),
             format::bytes(total_size),
             None,
-            egui::Color32::WHITE,
-        );
-        tile(
-            ui,
+            theme::TEXT_STRONG,
+        ),
+        (
             tr!("Already optimized"),
             format::bytes(optimized),
-            Some(&trf!("from {}", format::bytes(optimized_src))),
+            Some(&optimized_hint),
             theme::OK,
-        );
-        tile(
-            ui,
+        ),
+        (
             tr!("Estimated savings"),
             format!("≈ {}", format::bytes(savings)),
-            Some(&match calibrated {
-                Some(n) => trf!("estimate, calibrated with {} jobs", n),
-                None => tr!("estimate, not guaranteed").to_string(),
-            }),
-            theme::WARN,
-        );
-    });
-    ui.horizontal_wrapped(|ui| {
-        tile(
-            ui,
+            Some(&savings_hint),
+            theme::ACCENT,
+        ),
+        (
             tr!("Waiting jobs"),
-            count(JobState::Queued).to_string(),
+            waiting.to_string(),
             None,
-            egui::Color32::WHITE,
-        );
-        tile(
-            ui,
+            theme::TEXT_STRONG,
+        ),
+        (
             tr!("Active jobs"),
             active.to_string(),
             None,
-            theme::ACCENT,
-        );
-        tile(
-            ui,
+            if active > 0 {
+                theme::ACCENT
+            } else {
+                theme::TEXT_STRONG
+            },
+        ),
+        (
             tr!("Successful jobs"),
             done_hist.to_string(),
             None,
             theme::OK,
-        );
-        tile(
-            ui,
+        ),
+        (
             tr!("Failed jobs"),
             failed_hist.to_string(),
             None,
             if failed_hist > 0 {
                 theme::ERROR
             } else {
-                theme::MUTED
+                theme::TEXT_STRONG
             },
-        );
-    });
+        ),
+    ];
+    let gap = 12.0;
+    let per_row = if ui.available_width() < 760.0 { 2 } else { 4 };
+    let width = (ui.available_width() - gap * (per_row - 1) as f32) / per_row as f32;
+    for row in tiles.chunks(per_row) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for (title, value, hint, color) in row {
+                theme::stat_tile(ui, width, title, value.clone(), *hint, *color);
+            }
+        });
+        ui.add_space(gap - 6.0);
+    }
 
-    ui.add_space(10.0);
+    ui.add_space(6.0);
     ui.columns(2, |cols| {
         let ui = &mut cols[0];
         theme::card().show(ui, |ui| {
-            ui.label(RichText::new(tr!("Recommendations")).strong());
-            for rec in [
-                Recommendation::Transcode,
-                Recommendation::Remux,
-                Recommendation::AlreadyOptimal,
-                Recommendation::Review,
-            ] {
-                let n = lib
-                    .iter()
-                    .filter(|e| e.analysis.recommendation == rec)
-                    .count();
-                let size: u64 = lib
-                    .iter()
-                    .filter(|e| e.analysis.recommendation == rec)
-                    .map(|e| e.media.size_bytes)
-                    .sum();
-                ui.horizontal(|ui| {
-                    ui.label(format!("{n:>6}"));
-                    ui.label(rec.label());
-                    ui.label(RichText::new(format::bytes(size)).color(theme::MUTED));
+            ui.set_width(ui.available_width());
+            theme::section_title(ui, tr!("Recommendations"));
+            egui::Grid::new("recommendations")
+                .num_columns(3)
+                .spacing([16.0, 8.0])
+                .show(ui, |ui| {
+                    for rec in [
+                        Recommendation::Transcode,
+                        Recommendation::Remux,
+                        Recommendation::AlreadyOptimal,
+                        Recommendation::Review,
+                    ] {
+                        let (n, size) = lib
+                            .iter()
+                            .filter(|e| e.analysis.recommendation == rec)
+                            .fold((0, 0u64), |(n, s), e| (n + 1, s + e.media.size_bytes));
+                        ui.horizontal(|ui| {
+                            let (dot, _) =
+                                ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                            ui.painter()
+                                .circle_filled(dot.center(), 4.0, rec_color(rec));
+                            ui.label(rec.label());
+                        });
+                        ui.label(
+                            RichText::new(n.to_string())
+                                .strong()
+                                .color(theme::TEXT_STRONG),
+                        );
+                        ui.label(RichText::new(format::bytes(size)).color(theme::MUTED));
+                        ui.end_row();
+                    }
                 });
-            }
-            if let Some(summary) = &app.snap.scan_summary {
+            if let Some(summary) = &app.snap.scan_summary
+                && (!summary.issues.is_empty() || !summary.duplicates.is_empty())
+            {
+                ui.add_space(4.0);
                 ui.separator();
                 if !summary.issues.is_empty() {
                     ui.collapsing(trf!("{} scan problems", summary.issues.len()), |ui| {
@@ -282,34 +299,48 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
 
         let ui = &mut cols[1];
         theme::card().show(ui, |ui| {
-            ui.label(RichText::new(tr!("Largest files")).strong());
+            ui.set_width(ui.available_width());
+            theme::section_title(ui, tr!("Largest files"));
+            if lib.is_empty() {
+                ui.label(
+                    RichText::new(tr!("Scan the source to see your videos here"))
+                        .color(theme::MUTED),
+                );
+                return;
+            }
             let mut idx: Vec<usize> = (0..lib.len()).collect();
             idx.sort_by_key(|&i| std::cmp::Reverse(lib[i].media.size_bytes));
-            for &i in idx.iter().take(10) {
-                let e = &lib[i];
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(format::bytes(e.media.size_bytes)).monospace());
-                    ui.label(
-                        RichText::new(e.analysis.recommendation.label())
-                            .small()
-                            .color(theme::MUTED),
-                    );
-                    // long release names are truncated; full path on hover
-                    let link = ui
-                        .add(
-                            egui::Label::new(
-                                RichText::new(&e.media.file_name).color(theme::ACCENT),
+            egui::Grid::new("largest")
+                .num_columns(3)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
+                    for &i in idx.iter().take(10) {
+                        let e = &lib[i];
+                        ui.label(
+                            RichText::new(format::bytes(e.media.size_bytes))
+                                .monospace()
+                                .color(theme::TEXT_STRONG),
+                        );
+                        let rec = e.analysis.recommendation;
+                        theme::badge(ui, rec.label(), rec_color(rec));
+                        // long release names are truncated; full path on hover
+                        let link = ui
+                            .add(
+                                egui::Label::new(
+                                    RichText::new(&e.media.file_name).color(theme::TEXT),
+                                )
+                                .truncate()
+                                .sense(egui::Sense::click()),
                             )
-                            .truncate()
-                            .sense(egui::Sense::click()),
-                        )
-                        .on_hover_text(e.media.relative_path.display().to_string());
-                    if link.clicked() {
-                        app.library_ui.focus = Some(e.media.absolute_path.clone());
-                        app.view = View::Library;
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text(e.media.relative_path.display().to_string());
+                        if link.clicked() {
+                            app.library_ui.focus = Some(e.media.absolute_path.clone());
+                            app.view = View::Library;
+                        }
+                        ui.end_row();
                     }
                 });
-            }
         });
     });
 }

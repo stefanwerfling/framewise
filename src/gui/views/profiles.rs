@@ -47,12 +47,14 @@ fn row(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {
 }
 
 pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
-    ui.heading(tr!("Encoding profiles"));
-    ui.label(
-        RichText::new(tr!("Profiles are stored permanently. Built-in profiles can be adjusted and reset; 'Duplicate' creates a custom profile (D)."))
-            .color(theme::MUTED),
+    theme::page_header(
+        ui,
+        tr!("Encoding profiles"),
+        Some(tr!(
+            "Profiles are stored permanently. Built-in profiles can be adjusted and reset; 'Duplicate' creates a custom profile (D)."
+        )),
+        |_| {},
     );
-    ui.separator();
 
     let profiles = app.snap.profiles.clone();
     if app.profiles_ui.selected.is_none() {
@@ -148,7 +150,7 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
             // ---------------- video
             let ui = &mut cols[0];
             theme::card().show(ui, |ui| {
-                ui.label(RichText::new(tr!("Video")).strong());
+                theme::section_title(ui, tr!("Video"));
                 egui::Grid::new("video_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                     let v = &mut draft.video;
                     row(ui, tr!("Target codec"), |ui| {
@@ -225,7 +227,7 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
             });
 
             theme::card().show(ui, |ui| {
-                ui.label(RichText::new("HDR").strong());
+                theme::section_title(ui, "HDR");
                 egui::Grid::new("hdr_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                     let h = &mut draft.hdr;
                     row(ui, tr!("Strategy"), |ui| {
@@ -258,7 +260,7 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
             // ---------------- audio / subtitles / quality
             let ui = &mut cols[1];
             theme::card().show(ui, |ui| {
-                ui.label(RichText::new(tr!("Audio")).strong());
+                theme::section_title(ui, tr!("Audio"));
                 egui::Grid::new("audio_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                     let a = &mut draft.audio;
                     row(ui, tr!("Strategy"), |ui| {
@@ -302,7 +304,7 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
             });
 
             theme::card().show(ui, |ui| {
-                ui.label(RichText::new(tr!("Subtitles")).strong());
+                theme::section_title(ui, tr!("Subtitles"));
                 egui::Grid::new("sub_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                     let s = &mut draft.subtitles;
                     row(ui, tr!("Text subtitles"), |ui| {
@@ -323,7 +325,7 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
             });
 
             theme::card().show(ui, |ui| {
-                ui.label(RichText::new(tr!("Quality / smart encoding")).strong());
+                theme::section_title(ui, tr!("Quality / smart encoding"));
                 egui::Grid::new("q_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                     let q = &mut draft.quality;
                     row(ui, tr!("Metric"), |ui| {

@@ -36,19 +36,12 @@ impl Language {
         }
     }
 
-    /// Guess from the environment (`LC_ALL`, `LC_MESSAGES`, `LANG`).
-    pub fn from_env() -> Self {
-        ["LC_ALL", "LC_MESSAGES", "LANG"]
-            .iter()
-            .filter_map(|k| std::env::var(k).ok())
-            .find(|v| !v.is_empty())
-            .map_or(Language::English, |v| {
-                if v.to_ascii_lowercase().starts_with("de") {
-                    Language::German
-                } else {
-                    Language::English
-                }
-            })
+    /// Short code for compact switches.
+    pub fn code(self) -> &'static str {
+        match self {
+            Language::English => "EN",
+            Language::German => "DE",
+        }
     }
 }
 

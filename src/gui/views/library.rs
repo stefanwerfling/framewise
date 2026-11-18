@@ -307,11 +307,14 @@ fn sort_header(ui: &mut egui::Ui, state: &mut LibraryUi, key: SortKey, label: &s
 pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
     let lib = app.snap.library.clone();
 
-    ui.horizontal(|ui| {
-        ui.heading(tr!("Media library"));
-        ui.add_space(12.0);
-        scan_controls(app, ui);
-    });
+    theme::page_header(
+        ui,
+        tr!("Media library"),
+        Some(tr!("All scanned videos with analysis and recommendation")),
+        |_| {},
+    );
+    scan_controls(app, ui);
+    ui.add_space(4.0);
 
     // ---- filters
     let state = &mut app.library_ui;
@@ -445,7 +448,11 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
         if ui
             .add_enabled(
                 n_sel > 0,
-                egui::Button::new(trf!("Add selected to queue ({})", n_sel)),
+                if n_sel > 0 {
+                    theme::primary_button(trf!("Add selected to queue ({})", n_sel))
+                } else {
+                    egui::Button::new(trf!("Add selected to queue ({})", n_sel))
+                },
             )
             .clicked()
         {
@@ -468,7 +475,12 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
         if ui
             .add_enabled(
                 n_actionable > 0,
-                egui::Button::new(trf!("Add all recommended shown ({})", n_actionable)),
+                // the main action while nothing is selected
+                if n_sel == 0 && n_actionable > 0 {
+                    theme::primary_button(trf!("Add all recommended shown ({})", n_actionable))
+                } else {
+                    egui::Button::new(trf!("Add all recommended shown ({})", n_actionable))
+                },
             )
             .on_hover_text(tr!(
                 "Only files with recommendation 'Re-encode' or 'Remux' that are not queued yet"
@@ -1050,7 +1062,7 @@ fn details(ui: &mut egui::Ui, e: &LibraryEntry) {
                 .collect::<Vec<_>>()
                 .join(", ");
                 let color = if s.kind() == SubtitleKind::Text {
-                    egui::Color32::WHITE
+                    theme::TEXT_STRONG
                 } else {
                     theme::WARN
                 };

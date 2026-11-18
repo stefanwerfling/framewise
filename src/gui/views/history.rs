@@ -17,7 +17,12 @@ pub struct HistoryUi {
 }
 
 pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
-    ui.heading(tr!("History"));
+    theme::page_header(
+        ui,
+        tr!("History"),
+        Some(tr!("Finished, failed and cancelled jobs")),
+        |_| {},
+    );
     let done: Vec<_> = app
         .snap
         .history
@@ -224,13 +229,19 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
                 });
                 row.col(|ui| {
                     if h.state == JobState::Done && h.validation_passed {
-                        ui.label(RichText::new(tr!("passed")).color(theme::OK));
+                        theme::badge(ui, tr!("passed"), theme::OK);
                     } else {
                         let text = h
                             .error
                             .clone()
                             .unwrap_or_else(|| h.state.label().to_string());
-                        ui.label(RichText::new(&text).color(theme::ERROR).small())
+                        // cancelled or skipped is the user's choice, not an error
+                        let color = if matches!(h.state, JobState::Cancelled | JobState::Skipped) {
+                            theme::WARN
+                        } else {
+                            theme::ERROR
+                        };
+                        ui.label(RichText::new(&text).color(color).small())
                             .on_hover_text(text);
                     }
                 });

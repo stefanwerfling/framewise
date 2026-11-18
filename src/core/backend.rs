@@ -627,12 +627,7 @@ impl Backend {
             || cfg.scan.top_n_per_folder != self.config.scan.top_n_per_folder;
         let source_changed = cfg.library_key() != self.config.library_key();
         self.config = cfg;
-        i18n::set_language(
-            self.config
-                .ui
-                .language
-                .unwrap_or_else(i18n::Language::from_env),
-        );
+        i18n::set_language(self.config.ui.language.unwrap_or_default());
         if let Err(e) = self.config.save(&self.dirs.config_file) {
             self.notice(NoticeLevel::Error, e.to_string());
         }

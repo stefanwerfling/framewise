@@ -29,11 +29,16 @@ fn state_color(s: JobState) -> egui::Color32 {
 }
 
 pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
-    ui.heading(tr!("Queue"));
+    theme::page_header(
+        ui,
+        tr!("Queue"),
+        Some(tr!("Running and waiting encoding jobs")),
+        |_| {},
+    );
     ui.horizontal_wrapped(|ui| {
         if app.snap.queue_paused {
             if ui
-                .button(RichText::new(tr!("▶ Start / resume queue")).strong())
+                .add(theme::primary_button(tr!("▶ Start / resume queue")))
                 .clicked()
             {
                 app.send(Command::SetQueuePaused(false));
@@ -41,7 +46,7 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
             ui.label(
                 RichText::new(tr!("Queue paused – no new jobs are started")).color(theme::WARN),
             );
-        } else if ui.button(tr!("⏸ Pause queue")).clicked() {
+        } else if ui.button(tr!("‖ Pause queue")).clicked() {
             app.send(Command::SetQueuePaused(true));
         }
         let interrupted = app
@@ -161,7 +166,7 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
     let mut commands: Vec<Command> = Vec::new();
     let mut focus = app.queue_ui.focus;
     let mut confirm_cancel = app.queue_ui.confirm_cancel;
-    let row_h = 26.0;
+    let row_h = 30.0;
     // selectable labels would swallow the row click
     ui.style_mut().interaction.selectable_labels = false;
     // bound the table explicitly to the space left over by the details panel,
@@ -206,9 +211,9 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
                 row.col(|ui| {
                     let mut text = j.state.label().to_string();
                     if j.paused {
-                        text = format!("⏸ {text}");
+                        text = format!("‖ {text}");
                     }
-                    ui.label(RichText::new(text).color(state_color(j.state)));
+                    theme::badge(ui, text, state_color(j.state));
                 });
                 row.col(|ui| {
                     ui.label(&j.media.file_name).on_hover_text(format!(
@@ -296,7 +301,7 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
                                 if ui.small_button("▶").on_hover_text(tr!("Resume")).clicked() {
                                     commands.push(Command::ResumeJob(j.id));
                                 }
-                            } else if ui.small_button("⏸").on_hover_text(tr!("Pause")).clicked() {
+                            } else if ui.small_button("‖").on_hover_text(tr!("Pause")).clicked() {
                                 commands.push(Command::PauseJob(j.id));
                             }
                         }
@@ -392,10 +397,7 @@ fn confirm_cancel_dialog(app: &mut FramewiseApp, ctx: &egui::Context, commands: 
         ));
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if ui
-                .button(RichText::new(tr!("Cancel job")).color(theme::ERROR))
-                .clicked()
-            {
+            if ui.add(theme::danger_button(tr!("Cancel job"))).clicked() {
                 commands.push(Command::CancelJob(id));
                 close = true;
             }

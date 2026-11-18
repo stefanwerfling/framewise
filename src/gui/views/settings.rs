@@ -66,6 +66,12 @@ impl SettingsUi {
         }
     }
 
+    /// The language is switched (and saved) immediately, so the draft
+    /// follows instead of showing it as an unsaved change.
+    pub fn on_language_changed(&mut self, lang: Language) {
+        self.draft.ui.language = Some(lang);
+    }
+
     pub fn on_quick_connect(&mut self, event: QuickConnectEvent) {
         match event {
             QuickConnectEvent::Code(code) => self.quick_connect = QuickConnectUi::Code(code),
@@ -185,33 +191,35 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
     s.draft.encoding.active_profile = current.encoding.active_profile.clone();
     let dirty = s.draft != current;
 
-    ui.horizontal(|ui| {
-        ui.heading(tr!("Settings"));
-        if dirty {
-            ui.label(RichText::new(tr!("unsaved changes")).color(theme::WARN));
-        }
-    });
     let mut save = false;
     let mut revert = false;
-    ui.horizontal(|ui| {
-        save = ui
-            .add_enabled(
-                dirty,
-                egui::Button::new(RichText::new(tr!("Save")).strong()),
-            )
-            .clicked();
-        revert = ui
-            .add_enabled(dirty, egui::Button::new(tr!("Discard")))
-            .clicked();
-    });
-    ui.separator();
+    theme::page_header(
+        ui,
+        tr!("Settings"),
+        Some(tr!("Sources, tools, resources and interface")),
+        |ui| {
+            save = if dirty {
+                ui.add(theme::primary_button(tr!("Save"))).clicked()
+            } else {
+                ui.add_enabled(false, egui::Button::new(tr!("Save")))
+                    .clicked()
+            };
+            revert = ui
+                .add_enabled(dirty, egui::Button::new(tr!("Discard")))
+                .clicked();
+            if dirty {
+                theme::badge(ui, tr!("unsaved changes"), theme::WARN);
+            }
+        },
+    );
 
+    let mut language: Option<Language> = None;
     let mut pick: Option<(PathField, Option<PathBuf>)> = None;
     let mut jellyfin_action = None;
     egui::ScrollArea::vertical().show(ui, |ui| {
         theme::card().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new(tr!("Source")).strong());
+            theme::section_title(ui, tr!("Source"));
             ui.horizontal(|ui| {
                 for kind in SourceKind::ALL {
                     ui.radio_value(&mut s.draft.source, kind, kind.label());
@@ -228,7 +236,7 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
 
         theme::card().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new(tr!("Directories")).strong());
+            theme::section_title(ui, tr!("Directories"));
             if s.draft.source == SourceKind::Jellyfin {
                 ui.label(RichText::new(tr!("Only used for local files.")).small().color(theme::MUTED));
             }
@@ -259,16 +267,21 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
 
         theme::card().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new(tr!("Interface")).strong());
+            theme::section_title(ui, tr!("Interface"));
             egui::Grid::new("ui").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                 ui.label(tr!("Language"));
-                let label = s.draft.ui.language.map_or(tr!("System"), Language::native_name);
-                egui::ComboBox::from_id_salt("lang").selected_text(label).show_ui(ui, |ui| {
-                    ui.selectable_value(&mut s.draft.ui.language, None, tr!("System"));
-                    for l in Language::ALL {
-                        ui.selectable_value(&mut s.draft.ui.language, Some(l), l.native_name());
-                    }
-                });
+                let current = s.draft.ui.language.unwrap_or_default();
+                egui::ComboBox::from_id_salt("lang")
+                    .selected_text(current.native_name())
+                    .show_ui(ui, |ui| {
+                        for l in Language::ALL {
+                            if ui.selectable_label(l == current, l.native_name()).clicked()
+                                && l != current
+                            {
+                                language = Some(l);
+                            }
+                        }
+                    });
                 ui.end_row();
                 ui.label(tr!("Scale"));
                 ui.add(egui::Slider::new(&mut s.draft.ui.scale, 0.75..=2.0).step_by(0.05));
@@ -284,7 +297,7 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
 
         theme::card().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new("FFmpeg").strong());
+            theme::section_title(ui, "FFmpeg");
             egui::Grid::new("tools").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                 ui.label("ffmpeg");
                 let mut t = s.draft.ffmpeg_path.display().to_string();
@@ -303,7 +316,7 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
 
         theme::card().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new(tr!("Scanner")).strong());
+            theme::section_title(ui, tr!("Scanner"));
             egui::Grid::new("scan").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                 ui.label(tr!("File extensions"));
                 let mut ext = s.draft.scan.extensions.join(", ");
@@ -336,7 +349,7 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
 
         theme::card().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new(tr!("Output and safety")).strong());
+            theme::section_title(ui, tr!("Output and safety"));
             egui::Grid::new("safety").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                 ui.label(tr!("If target exists"));
                 egui::ComboBox::from_id_salt("conflict")
@@ -358,7 +371,7 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
 
         theme::card().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new(tr!("Resources")).strong());
+            theme::section_title(ui, tr!("Resources"));
             egui::Grid::new("res").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                 let r = &mut s.draft.resources;
                 ui.label(tr!("Parallel jobs"));
@@ -386,7 +399,7 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
 
         theme::card().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new(tr!("Hardware acceleration")).strong());
+            theme::section_title(ui, tr!("Hardware acceleration"));
             egui::Grid::new("hw").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                 let r = &mut s.draft.resources;
                 ui.label(tr!("Hardware encoding"));
@@ -465,6 +478,9 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
     if let Some(command) = command {
         app.send(command);
     }
+    if let Some(lang) = language {
+        app.set_language(lang);
+    }
 }
 
 /// Server address, login, connection test and library choice.
@@ -472,7 +488,7 @@ fn jellyfin_card(ui: &mut egui::Ui, s: &mut SettingsUi) -> Option<JellyfinAction
     let mut action = None;
     theme::card().show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.label(RichText::new("Jellyfin").strong());
+        theme::section_title(ui, "Jellyfin");
         let j = &mut s.draft.jellyfin;
         egui::Grid::new("jellyfin").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
             ui.label(tr!("Server address"));
@@ -627,7 +643,7 @@ fn jellyfin_card(ui: &mut egui::Ui, s: &mut SettingsUi) -> Option<JellyfinAction
 fn health_card(ui: &mut egui::Ui, h: &mut crate::core::config::HealthSettings) {
     theme::card().show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.label(RichText::new(tr!("Health check")).strong());
+        theme::section_title(ui, tr!("Health check"));
         ui.label(tr!("Playback risk measures against the most compatible format – what every common TV player plays directly, the plain 1080p Fire TV stick included, so the server only has to deliver the file:"));
         ui.label(
             RichText::new(tr!("MP4/MKV · H.264 (8 bit) or HEVC · up to 1080p · at most 20 Mbit/s · progressive, constant frame rate, closed GOPs · SDR/HDR10/HLG, Dolby Vision only with HDR10 base · audio AAC/AC3/E-AC3 · text subtitles · MP4 index at the start"))

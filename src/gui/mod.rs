@@ -48,6 +48,18 @@ impl View {
         View::Settings,
     ];
 
+    fn icon(self) -> &'static str {
+        match self {
+            View::Dashboard => "⊞",
+            View::Library => "▤",
+            View::Profiles => "☰",
+            View::Queue => "▶",
+            View::Hardware => "▥",
+            View::History => "⟲",
+            View::Settings => "⚙",
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             View::Dashboard => tr!("Dashboard"),
@@ -190,7 +202,7 @@ impl FramewiseApp {
                 AppEvent::Tools(info) => self.snap.tools = Some(info),
                 AppEvent::Hardware(caps) => self.snap.caps = Some(caps),
                 AppEvent::Config(cfg) => {
-                    i18n::set_language(cfg.ui.language.unwrap_or_else(i18n::Language::from_env));
+                    i18n::set_language(cfg.ui.language.unwrap_or_default());
                     self.snap.config = *cfg;
                 }
                 AppEvent::ScanProgress(p) => self.snap.scan_progress = Some(p),
@@ -277,22 +289,15 @@ impl FramewiseApp {
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading(
-                egui::RichText::new("Framewise")
-                    .color(theme::ACCENT)
-                    .strong(),
-            );
-            ui.label(egui::RichText::new(tr!("Media Optimizer")).color(theme::MUTED));
-            ui.separator();
-
-            ui.label(tr!("Profile:"));
+            ui.label(egui::RichText::new(tr!("Active profile")).color(theme::MUTED));
             let current = self
                 .active_profile()
                 .map(|p| p.name.clone())
                 .unwrap_or_else(|| "–".into());
             let mut selected = self.snap.config.encoding.active_profile.clone();
             egui::ComboBox::from_id_salt("active_profile")
-                .selected_text(current)
+                .selected_text(egui::RichText::new(current).strong())
+                .width(220.0)
                 .show_ui(ui, |ui| {
                     for p in &self.snap.profiles {
                         ui.selectable_value(
@@ -319,22 +324,14 @@ impl FramewiseApp {
                     .iter()
                     .filter(|j| j.state == JobState::Queued)
                     .count();
-                if running > 0 {
-                    ui.label(
-                        egui::RichText::new(crate::trf!(
-                            "▶ {} active · {} waiting",
-                            running,
-                            queued
-                        ))
-                        .color(theme::OK),
-                    );
-                } else if queued > 0 {
-                    ui.label(
-                        egui::RichText::new(crate::trf!("{} waiting", queued)).color(theme::MUTED),
-                    );
-                }
                 if self.snap.queue_paused && queued > 0 {
-                    ui.label(egui::RichText::new(tr!("⏸ Queue paused")).color(theme::WARN));
+                    theme::badge(ui, tr!("‖ Queue paused"), theme::WARN);
+                }
+                if queued > 0 {
+                    theme::badge(ui, crate::trf!("{} waiting", queued), theme::MUTED);
+                }
+                if running > 0 {
+                    theme::badge(ui, crate::trf!("▶ {} active", running), theme::OK);
                 }
                 if let Some(p) = &self.snap.scan_progress {
                     views::dashboard::scan_progress_label(ui, p);
@@ -344,63 +341,138 @@ impl FramewiseApp {
     }
 
     fn nav(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(6.0);
-        for view in View::ALL {
-            let mut text = egui::RichText::new(view.label());
-            if view == View::Queue {
-                let n = self
-                    .snap
-                    .jobs
-                    .iter()
-                    .filter(|j| !j.state.is_finished())
-                    .count();
-                if n > 0 {
-                    text = egui::RichText::new(format!("{}  ({n})", view.label()));
-                }
+        // brand
+        ui.add_space(14.0);
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::hover());
+            let painter = ui.painter();
+            painter.rect_filled(rect, 8.0, theme::ACCENT);
+            // three stacked frames: a stylised film strip
+            for (i, w) in [14.0_f32, 10.0, 6.0].iter().enumerate() {
+                let y = rect.top() + 9.0 + i as f32 * 5.0;
+                painter.rect_filled(
+                    egui::Rect::from_min_size(
+                        egui::pos2(rect.left() + 8.0, y),
+                        egui::vec2(*w, 3.0),
+                    ),
+                    1.5,
+                    theme::ON_ACCENT,
+                );
             }
-            if ui
-                .add_sized(
-                    [ui.available_width(), 28.0],
-                    egui::Button::selectable(self.view == view, text),
-                )
-                .clicked()
-            {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.label(
+                    egui::RichText::new("Framewise")
+                        .size(16.0)
+                        .strong()
+                        .color(theme::TEXT_STRONG),
+                );
+                ui.label(
+                    egui::RichText::new(tr!("Media Optimizer"))
+                        .small()
+                        .color(theme::MUTED),
+                );
+            });
+        });
+        ui.add_space(18.0);
+
+        let open_jobs = self
+            .snap
+            .jobs
+            .iter()
+            .filter(|j| !j.state.is_finished())
+            .count();
+        for view in View::ALL {
+            let badge = (view == View::Queue && open_jobs > 0).then_some(open_jobs);
+            if nav_item(ui, view.icon(), view.label(), self.view == view, badge).clicked() {
                 self.view = view;
             }
         }
+
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                        .small()
+                        .color(theme::MUTED),
+                );
+                match &self.snap.tools {
+                    Some(t) if t.ready() => {
+                        theme::badge(ui, "ffmpeg ✔", theme::OK);
+                    }
+                    Some(_) => {
+                        theme::badge(ui, tr!("ffmpeg missing"), theme::ERROR);
+                    }
+                    None => {
+                        theme::badge(ui, tr!("Checking ffmpeg…"), theme::MUTED);
+                    }
+                }
+            });
+            ui.add_space(6.0);
+            self.language_switch(ui);
             ui.add_space(4.0);
-            match &self.snap.tools {
-                Some(t) if t.ready() => {
-                    ui.label(egui::RichText::new("ffmpeg ✔").small().color(theme::OK));
-                }
-                Some(_) => {
-                    ui.label(
-                        egui::RichText::new(tr!("ffmpeg missing"))
-                            .small()
-                            .color(theme::ERROR),
-                    );
-                }
-                None => {
-                    ui.label(
-                        egui::RichText::new(tr!("Checking ffmpeg…"))
-                            .small()
-                            .color(theme::MUTED),
-                    );
+            ui.separator();
+        });
+    }
+
+    /// EN | DE segmented switch; applies at once and is saved.
+    fn language_switch(&mut self, ui: &mut egui::Ui) {
+        let current = i18n::language();
+        let mut chosen = None;
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(tr!("Language"))
+                    .small()
+                    .color(theme::MUTED),
+            );
+            ui.add_space(4.0);
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for lang in i18n::Language::ALL {
+                let on = lang == current;
+                let text = egui::RichText::new(lang.code())
+                    .small()
+                    .strong()
+                    .color(if on { theme::ON_ACCENT } else { theme::TEXT });
+                let button = egui::Button::new(text)
+                    .fill(if on { theme::ACCENT } else { theme::SURFACE })
+                    .stroke(egui::Stroke::new(1.0, theme::BORDER))
+                    .min_size(egui::vec2(34.0, 20.0));
+                if ui.add(button).on_hover_text(lang.native_name()).clicked() && !on {
+                    chosen = Some(lang);
                 }
             }
         });
+        if let Some(lang) = chosen {
+            self.set_language(lang);
+        }
+    }
+
+    pub fn set_language(&mut self, lang: i18n::Language) {
+        i18n::set_language(lang);
+        self.settings_ui.on_language_changed(lang);
+        self.update_config(|c| c.ui.language = Some(lang));
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let r = &self.snap.resources;
-            ui.label(egui::RichText::new(format!("CPU {:.0} %", r.cpu_percent)).small());
+            let cpu = r.cpu_percent / 100.0;
+            ui.label(egui::RichText::new("CPU").small().color(theme::MUTED));
+            theme::meter(ui, 56.0, cpu, theme::load_color(cpu));
+            ui.label(egui::RichText::new(format!("{:.0} %", r.cpu_percent)).small());
             if r.mem_total > 0 {
                 let used = r.mem_total.saturating_sub(r.mem_available);
+                let frac = used as f32 / r.mem_total as f32;
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("RAM").small().color(theme::MUTED));
+                theme::meter(ui, 56.0, frac, theme::load_color(frac));
                 ui.label(
                     egui::RichText::new(format!(
-                        "RAM {} / {}",
+                        "{} / {}",
                         format::bytes(used),
                         format::bytes(r.mem_total)
                     ))
@@ -409,47 +481,122 @@ impl FramewiseApp {
             }
             for g in &r.gpus {
                 if let Some(u) = g.utilization {
-                    ui.label(egui::RichText::new(format!("GPU {u:.0} %")).small());
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new("GPU").small().color(theme::MUTED));
+                    theme::meter(ui, 56.0, u / 100.0, theme::load_color(u / 100.0));
+                    ui.label(egui::RichText::new(format!("{u:.0} %")).small());
                 }
             }
             if let Some(gate) = &self.snap.gate {
+                ui.add_space(6.0);
                 ui.label(
                     egui::RichText::new(format!("⏳ {}", gate.describe()))
                         .small()
                         .color(theme::WARN),
                 );
             }
-            ui.separator();
-            if let Some(n) = self.notices.back() {
-                let color = match n.level {
-                    NoticeLevel::Info => theme::MUTED,
-                    NoticeLevel::Warning => theme::WARN,
-                    NoticeLevel::Error => theme::ERROR,
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let Some(n) = self.notices.back() else {
+                    return;
                 };
-                if n.at.elapsed() < Duration::from_secs(30) || n.level == NoticeLevel::Error {
-                    // offered only while the job is still there and retryable
-                    let retry = n.job.filter(|id| {
-                        self.snap
-                            .jobs
-                            .iter()
-                            .any(|j| j.id == *id && j.state.can_retry())
-                    });
-                    if let Some(id) = retry
-                        && ui
-                            .small_button("↻")
-                            .on_hover_text(tr!(
-                                "Put the job back on the queue – it starts from the beginning"
-                            ))
-                            .clicked()
-                    {
-                        self.send(Command::RetryJob(id));
-                    }
-                    ui.label(egui::RichText::new(&n.text).small().color(color))
-                        .on_hover_text(&n.text);
+                if n.at.elapsed() >= Duration::from_secs(30) && n.level != NoticeLevel::Error {
+                    return;
                 }
-            }
+                let (icon, color) = match n.level {
+                    NoticeLevel::Info => ("ℹ", theme::TEXT),
+                    NoticeLevel::Warning => ("⚠", theme::WARN),
+                    NoticeLevel::Error => ("✖", theme::ERROR),
+                };
+                // offered only while the job is still there and retryable
+                let retry = n.job.filter(|id| {
+                    self.snap
+                        .jobs
+                        .iter()
+                        .any(|j| j.id == *id && j.state.can_retry())
+                });
+                if let Some(id) = retry
+                    && ui
+                        .small_button(tr!("↻ Retry"))
+                        .on_hover_text(tr!(
+                            "Put the job back on the queue – it starts from the beginning"
+                        ))
+                        .clicked()
+                {
+                    self.send(Command::RetryJob(id));
+                }
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&n.text).small().color(color)).truncate(),
+                )
+                .on_hover_text(&n.text);
+                ui.label(egui::RichText::new(icon).color(color));
+            });
         });
     }
+}
+
+/// One sidebar entry: icon, label, optional count; highlighted when active.
+fn nav_item(
+    ui: &mut egui::Ui,
+    icon: &str,
+    label: &str,
+    selected: bool,
+    badge: Option<usize>,
+) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), egui::Sense::click());
+    let hovered = response.hovered();
+    let painter = ui.painter();
+    if selected {
+        painter.rect_filled(rect, 7.0, theme::ACCENT.gamma_multiply(0.16));
+        painter.rect_filled(
+            egui::Rect::from_min_size(
+                egui::pos2(rect.left(), rect.top() + 8.0),
+                egui::vec2(3.0, rect.height() - 16.0),
+            ),
+            1.5,
+            theme::ACCENT,
+        );
+    } else if hovered {
+        painter.rect_filled(rect, 7.0, theme::SURFACE);
+    }
+    let color = if selected {
+        theme::TEXT_STRONG
+    } else if hovered {
+        theme::TEXT
+    } else {
+        theme::MUTED
+    };
+    let y = rect.center().y;
+    painter.text(
+        egui::pos2(rect.left() + 14.0, y),
+        egui::Align2::LEFT_CENTER,
+        icon,
+        egui::FontId::proportional(15.0),
+        if selected { theme::ACCENT } else { color },
+    );
+    painter.text(
+        egui::pos2(rect.left() + 40.0, y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(14.0),
+        color,
+    );
+    if let Some(n) = badge {
+        let text = n.to_string();
+        let galley =
+            painter.layout_no_wrap(text, egui::FontId::proportional(11.0), theme::ON_ACCENT);
+        let size = egui::vec2((galley.size().x + 12.0).max(20.0), 18.0);
+        let pill =
+            egui::Rect::from_center_size(egui::pos2(rect.right() - 10.0 - size.x / 2.0, y), size);
+        painter.rect_filled(pill, 9.0, theme::ACCENT);
+        painter.galley(
+            pill.center() - galley.size() / 2.0,
+            galley,
+            theme::ON_ACCENT,
+        );
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 impl eframe::App for FramewiseApp {
@@ -463,25 +610,38 @@ impl eframe::App for FramewiseApp {
         // Keep live values (progress, monitor) moving even without input.
         ctx.request_repaint_after(Duration::from_millis(500));
 
-        egui::Panel::top("top_bar").show(ui, |ui| {
-            ui.add_space(4.0);
-            self.top_bar(ui);
-            ui.add_space(2.0);
-        });
-        egui::Panel::bottom("status_bar").show(ui, |ui| self.status_bar(ui));
+        let chrome = |margin: egui::Margin| {
+            egui::Frame::new()
+                .fill(theme::CHROME)
+                .inner_margin(margin)
+                .stroke(egui::Stroke::new(1.0, theme::BORDER))
+        };
         egui::Panel::left("nav")
             .resizable(false)
-            .exact_size(170.0)
+            .exact_size(212.0)
+            .frame(chrome(egui::Margin::symmetric(10, 0)))
             .show(ui, |ui| self.nav(ui));
-        egui::CentralPanel::default().show(ui, |ui| match self.view {
-            View::Dashboard => views::dashboard::show(self, ui),
-            View::Library => views::library::show(self, ui),
-            View::Profiles => views::profiles::show(self, ui),
-            View::Queue => views::queue::show(self, ui),
-            View::Hardware => views::hardware::show(self, ui),
-            View::History => views::history::show(self, ui),
-            View::Settings => views::settings::show(self, ui),
-        });
+        egui::Panel::top("top_bar")
+            .frame(chrome(egui::Margin::symmetric(20, 10)))
+            .show(ui, |ui| self.top_bar(ui));
+        egui::Panel::bottom("status_bar")
+            .frame(chrome(egui::Margin::symmetric(16, 5)))
+            .show(ui, |ui| self.status_bar(ui));
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::BG)
+                    .inner_margin(egui::Margin::symmetric(24, 18)),
+            )
+            .show(ui, |ui| match self.view {
+                View::Dashboard => views::dashboard::show(self, ui),
+                View::Library => views::library::show(self, ui),
+                View::Profiles => views::profiles::show(self, ui),
+                View::Queue => views::queue::show(self, ui),
+                View::Hardware => views::hardware::show(self, ui),
+                View::History => views::history::show(self, ui),
+                View::Settings => views::settings::show(self, ui),
+            });
 
         views::preview::show(self, &ctx);
     }

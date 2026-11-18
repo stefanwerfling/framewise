@@ -148,7 +148,7 @@ pub fn show(app: &mut FramewiseApp, ctx: &egui::Context) {
             if ui
                 .add_enabled(
                     !requests.is_empty(),
-                    egui::Button::new(RichText::new(trf!("Add {} job(s)", requests.len())).strong()),
+                    theme::primary_button(trf!("Add {} job(s)", requests.len())),
                 )
                 .clicked()
             {
