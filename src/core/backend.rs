@@ -1105,8 +1105,14 @@ impl Backend {
             j.finished_unix = Some(now_unix());
             let j = j.clone();
             self.save_job(&j);
+            // keep a trace in the history so the job can be put back from
+            // there even after "Remove finished"
+            if let Err(e) = self.db.add_history(&HistoryEntry::from_job(&j)) {
+                tracing::error!("history insert failed: {e}");
+            }
             self.emit(AppEvent::JobUpdated(Box::new(j)));
             self.publish_library();
+            self.send_history();
         }
     }
 
@@ -1273,9 +1279,7 @@ impl Backend {
         {
             finalize::release(&RealFs, journal);
         }
-        if job.state != JobState::Cancelled
-            && let Err(e) = self.db.add_history(&HistoryEntry::from_job(&job))
-        {
+        if let Err(e) = self.db.add_history(&HistoryEntry::from_job(&job)) {
             tracing::error!("history insert failed: {e}");
         }
         match job.state {

@@ -459,3 +459,7 @@ statt fest im Profil zu stehen.
 - Verlauf: ↻ je Zeile und Knopf „Angezeigte Fehlschläge neu einreihen“ setzen fehlgeschlagene,
   abgebrochene oder übersprungene Einträge zurück auf die Warteliste – auch wenn der Job aus der
   Warteschlange schon entfernt wurde. Ein inzwischen vorhandenes Ziel wird nicht überschrieben.
+- Abgebrochene Jobs landen jetzt auch im Verlauf (bisher nur fertige, fehlgeschlagene und
+  übersprungene) und lassen sich dort neu einreihen – auch nach „Beendete entfernen“.
+- Warteschlange: beendete Jobs stehen nach Zeitpunkt sortiert (neueste zuerst), unabhängig von der
+  Priorität; ein gerade abgebrochener Job erscheint so direkt unter den wartenden.

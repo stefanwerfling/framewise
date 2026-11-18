@@ -129,16 +129,17 @@ pub fn show(app: &mut FramewiseApp, ui: &mut egui::Ui) {
                 2
             }
         };
-        rank(a)
-            .cmp(&rank(b))
-            .then(b.priority.cmp(&a.priority))
-            .then_with(|| {
-                if rank(a) == 2 {
-                    b.finished_unix.cmp(&a.finished_unix)
-                } else {
-                    a.position.cmp(&b.position)
-                }
-            })
+        rank(a).cmp(&rank(b)).then_with(|| {
+            if rank(a) == 2 {
+                // newest first, so a job just cancelled shows up right
+                // below the waiting ones whatever its priority
+                b.finished_unix.cmp(&a.finished_unix)
+            } else {
+                b.priority
+                    .cmp(&a.priority)
+                    .then(a.position.cmp(&b.position))
+            }
+        })
     });
 
     if let Some(job) = app
