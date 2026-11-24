@@ -30,6 +30,7 @@ use crate::encoding::quality::{self, AutoChoice, QualityContext, QualityResult};
 use crate::encoding::validate::{
     self, CheckKind, ValidateRequest, ValidationCheck, ValidationReport,
 };
+use crate::health::{self, Finding};
 use crate::media::model::MediaFile;
 use crate::media::probe::{self, FileFacts};
 use crate::{tr, trf};
@@ -197,6 +198,24 @@ where
     outcome
 }
 
+/// Fails with [`Error::SourceDamaged`] if the source contains zero-filled
+/// regions. A failing scan itself is only logged: the encode and its
+/// validation still catch real problems.
+async fn check_source_intact(media: &MediaFile) -> Result<()> {
+    let input = health::check::Input::File(media.absolute_path.clone());
+    match health::check::zeroed_data(&input, media.duration_s()).await {
+        Ok(findings) if findings.is_empty() => Ok(()),
+        Ok(findings) => {
+            let text: Vec<String> = findings.iter().map(Finding::describe).collect();
+            Err(Error::SourceDamaged(text.join("; ")))
+        }
+        Err(e) => {
+            tracing::warn!("zero scan of {} failed: {e}", media.absolute_path.display());
+            Ok(())
+        }
+    }
+}
+
 /// Reads mastering display / content light level of an HDR source into
 /// `media`. Without them HDR is still kept, only less precisely signalled.
 async fn read_hdr_metadata(ctx: &RunnerContext, media: &mut MediaFile, plan: &EncodePlan) {
@@ -310,6 +329,10 @@ where
         let reasons: Vec<String> = plan.blockers.iter().map(|b| b.describe()).collect();
         return Err(Error::Plan(reasons.join("; ")));
     }
+
+    // 1b. Damaged source (zero-filled after a broken copy)? Encoding would
+    //     take hours and fail the duration check at the end.
+    check_source_intact(&media).await?;
 
     // 2. Target conflict (re-checked right before work starts).
     if job.target.exists() && !job.replace_existing {

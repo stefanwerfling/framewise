@@ -36,6 +36,9 @@ pub enum Error {
     Serde(serde_json::Error),
     Plan(String),
     Validation(String),
+    /// The source file is damaged (e.g. zero-filled); encoding would only
+    /// reproduce the damage.
+    SourceDamaged(String),
     Cancelled,
 }
 
@@ -74,6 +77,7 @@ impl fmt::Display for Error {
             Error::Validation(m) => {
                 trf!("Validation failed: {}", m)
             }
+            Error::SourceDamaged(m) => trf!("Source is damaged: {}", m),
             Error::Cancelled => tr!("Operation cancelled").to_string(),
         };
         f.write_str(&text)

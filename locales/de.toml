@@ -629,3 +629,9 @@
 "All scanned videos with analysis and recommendation" = "Alle gescannten Videos mit Analyse und Empfehlung"
 "Running and waiting encoding jobs" = "Laufende und wartende Kodier-Jobs"
 "Sources, tools, resources and interface" = "Quellen, Werkzeuge, Ressourcen und Oberfläche"
+
+# damaged sources (zero-filled regions)
+"Source is damaged: {}" = "Quelle beschädigt: {}"
+"{} of the file contain only zeros from about {} to the end – the film is missing from there (damaged copy)" = "{} der Datei enthalten ab ca. {} bis zum Ende nur Nullen – ab dort fehlt der Film (beschädigte Kopie)"
+"{} of the file contain only zeros, about {} to {} – this part of the film is missing (damaged copy)" = "{} der Datei enthalten nur Nullen, ca. {} bis {} – dieser Teil des Films fehlt (beschädigte Kopie)"
+"{} of the file contain only zeros – part of the film is missing (damaged copy)" = "{} der Datei enthalten nur Nullen – ein Teil des Films fehlt (beschädigte Kopie)"

@@ -5,10 +5,12 @@
 //!   hints at audio/video drift. Free, computed for every file.
 //! * Stage 2 ([`check`]): quick check with ffprobe – header plus a few short
 //!   decoded samples, read locally or through the media server's API.
-//!   Finds broken data, audio gaps and offsets.
+//!   Finds broken data, audio gaps and offsets, and zero-filled regions
+//!   ([`zeros`]) left behind by damaged copies.
 
 pub mod check;
 pub mod risk;
+pub mod zeros;
 
 use serde::{Deserialize, Serialize};
 
@@ -73,13 +75,22 @@ pub enum Finding {
         at: f64,
         audio: bool,
     },
+    /// `bytes` of the file are zeros – that part of the film is missing.
+    /// `from`/`to`: estimated play time (unknown without a duration);
+    /// `to_end`: the zeros run up to the end of the file.
+    ZeroedData {
+        from: Option<f64>,
+        to: Option<f64>,
+        bytes: u64,
+        to_end: bool,
+    },
 }
 
 impl Finding {
     pub fn severity(&self) -> Severity {
         use Finding::*;
         match self {
-            Unreadable(_) | DecodeErrors { .. } => Severity::Defect,
+            Unreadable(_) | DecodeErrors { .. } | ZeroedData { .. } => Severity::Defect,
             AudioOffset(_)
             | LengthMismatch { .. }
             | AudioGap { .. }
@@ -146,7 +157,54 @@ impl Finding {
                 if *audio { tr!("audio") } else { tr!("video") },
                 timecode(*at)
             ),
+            ZeroedData {
+                from,
+                to,
+                bytes,
+                to_end,
+            } => match (from, to) {
+                (Some(from), _) if *to_end => trf!(
+                    "{} of the file contain only zeros from about {} to the end – the film is missing from there (damaged copy)",
+                    data_size(*bytes),
+                    timecode(*from)
+                ),
+                (Some(from), Some(to)) => trf!(
+                    "{} of the file contain only zeros, about {} to {} – this part of the film is missing (damaged copy)",
+                    data_size(*bytes),
+                    timecode(*from),
+                    timecode(*to)
+                ),
+                _ => trf!(
+                    "{} of the file contain only zeros – part of the film is missing (damaged copy)",
+                    data_size(*bytes)
+                ),
+            },
         }
+    }
+
+    /// Zero-filled regions of a file as findings.
+    pub fn zeroed(regions: &[zeros::ZeroRegion], size: u64, duration: Option<f64>) -> Vec<Finding> {
+        regions
+            .iter()
+            .map(|r| {
+                let time = |b| duration.map(|d| zeros::ZeroRegion::time_at(b, size, d));
+                Finding::ZeroedData {
+                    from: time(r.start),
+                    to: time(r.end),
+                    bytes: r.bytes(),
+                    to_end: r.reaches_end(size),
+                }
+            })
+            .collect()
+    }
+}
+
+/// `2_600_000_000` → `2.6 GB`.
+fn data_size(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 {
+        format!("{:.1} GB", bytes as f64 / 1e9)
+    } else {
+        format!("{} MB", bytes / 1_000_000)
     }
 }
 
@@ -174,8 +232,8 @@ pub struct CheckReport {
 
 /// Raised when the quick check learns something new; older reports then
 /// count as unchecked. 2: MP4 index position, first sample at 0:00.
-/// 3: open GOP.
-pub const CHECK_VERSION: u32 = 3;
+/// 3: open GOP. 4: zero-filled regions.
+pub const CHECK_VERSION: u32 = 4;
 
 impl CheckReport {
     /// Valid for the file version with `fingerprint`.

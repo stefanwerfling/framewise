@@ -1,9 +1,10 @@
 //! Stage 2: quick check with ffprobe.
 //!
 //! 1. Header: start time and length of the video and the main audio track.
-//! 2. A few short samples spread over the file are decoded (`-show_frames`
+//! 2. Zero-filled regions (damaged copy), read in small blocks.
+//! 3. A few short samples spread over the file are decoded (`-show_frames`
 //!    with `-read_intervals`): decoder errors, gaps and backwards jumps in the
-//!    timestamps.
+//!    timestamps. Samples inside zero-filled regions are skipped.
 //!
 //! The input is a local file or an HTTP URL (media server). Over HTTP ffprobe
 //! seeks with range requests, so only the samples are transferred.
@@ -101,8 +102,20 @@ pub async fn run(
         // Not essential: the samples below still run.
         Err(e) => tracing::debug!("MP4 layout not read: {e}"),
     }
+    let mut missing = Vec::new();
+    match zeroed_data(input, header.duration).await {
+        Ok(found) => {
+            missing = found.iter().filter_map(missing_span).collect();
+            report.findings.extend(found);
+        }
+        Err(e) => tracing::debug!("zero scan failed: {e}"),
+    }
 
     for at in sample_points(header.duration, options) {
+        // ffprobe searches zero-filled data until it times out.
+        if missing.iter().any(|(from, to)| at >= *from && at <= *to) {
+            continue;
+        }
         if cancel.load(Ordering::Relaxed) {
             return None;
         }
@@ -286,6 +299,35 @@ pub fn parse_header(json: &[u8]) -> Option<Header> {
     })
 }
 
+// ------------------------------------------------------------- zero scan
+
+/// Zero-filled regions of the file (see [`super::zeros`]).
+pub async fn zeroed_data(input: &Input, duration: Option<f64>) -> Result<Vec<Finding>, String> {
+    let mut reader = RangeReader::new(input)?;
+    let size = reader.size().await?;
+    let regions = super::zeros::find_zero_regions(&mut reader, size).await?;
+    Ok(Finding::zeroed(&regions, size, duration))
+}
+
+/// Play time range of a zero finding, widened for the rough estimate.
+fn missing_span(f: &Finding) -> Option<(f64, f64)> {
+    match f {
+        Finding::ZeroedData {
+            from: Some(from),
+            to: Some(to),
+            to_end,
+            ..
+        } => {
+            let margin = (to - from) * 0.1 + 120.0;
+            Some((
+                from - margin,
+                if *to_end { f64::INFINITY } else { to + margin },
+            ))
+        }
+        _ => None,
+    }
+}
+
 // -------------------------------------------------------------- MP4 layout
 
 /// Top-level boxes read at most (MP4 files have a handful).
@@ -346,7 +388,7 @@ pub fn layout_index_at_end(boxes: &[(String, u64)]) -> Option<u64> {
 }
 
 /// Reads byte ranges of a local file or over HTTP (range requests).
-enum RangeReader {
+pub enum RangeReader {
     File(std::path::PathBuf),
     Http {
         client: reqwest::Client,
@@ -355,8 +397,14 @@ enum RangeReader {
     },
 }
 
+impl super::zeros::ByteSource for RangeReader {
+    async fn read(&mut self, pos: u64, len: u64) -> Result<Vec<u8>, String> {
+        RangeReader::read(self, pos, len).await
+    }
+}
+
 impl RangeReader {
-    fn new(input: &Input) -> Result<Self, String> {
+    pub fn new(input: &Input) -> Result<Self, String> {
         Ok(match input {
             Input::File(path) => RangeReader::File(path.clone()),
             Input::Http { url, authorization } => RangeReader::Http {
@@ -370,7 +418,36 @@ impl RangeReader {
         })
     }
 
-    async fn read(&mut self, pos: u64, len: u64) -> Result<Vec<u8>, String> {
+    /// Size of the file; over HTTP taken from `Content-Range` of a 1-byte read.
+    pub async fn size(&mut self) -> Result<u64, String> {
+        match self {
+            RangeReader::File(path) => tokio::fs::metadata(&path)
+                .await
+                .map(|m| m.len())
+                .map_err(|e| e.to_string()),
+            RangeReader::Http {
+                client,
+                url,
+                authorization,
+            } => {
+                let response = client
+                    .get(url.as_str())
+                    .header(reqwest::header::AUTHORIZATION, authorization.as_str())
+                    .header(reqwest::header::RANGE, "bytes=0-0")
+                    .send()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                response
+                    .headers()
+                    .get(reqwest::header::CONTENT_RANGE)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(content_range_total)
+                    .ok_or_else(|| format!("no file size (status {})", response.status()))
+            }
+        }
+    }
+
+    pub async fn read(&mut self, pos: u64, len: u64) -> Result<Vec<u8>, String> {
         match self {
             RangeReader::File(path) => {
                 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -412,6 +489,11 @@ impl RangeReader {
             }
         }
     }
+}
+
+/// `bytes 0-0/13334918078` → `13334918078`.
+pub fn content_range_total(value: &str) -> Option<u64> {
+    value.rsplit_once('/')?.1.trim().parse().ok()
 }
 
 // ----------------------------------------------------------------- samples
@@ -869,6 +951,11 @@ mod tests {
         assert_eq!(layout_index_at_end(&end), Some(8_090_000));
         let front = boxes(&[("ftyp", 32), ("moov", 8_090_000), ("mdat", 4_000_000)]);
         assert_eq!(layout_index_at_end(&front), None);
+        assert_eq!(
+            content_range_total("bytes 0-0/13334918078"),
+            Some(13_334_918_078)
+        );
+        assert_eq!(content_range_total("bytes 0-0/*"), None);
         assert_eq!(
             layout_index_at_end(&boxes(&[("ftyp", 32), ("mdat", 0)])),
             None
